@@ -1,0 +1,23 @@
+new_venv/
+run.py
+yolo_weights/
+
+# Augmented dataset (large binaries — distribute via Drive / release / cloud; see README)
+data/augmented/
+
+# Raw camera images + per-image labels (large; keep local or share like augmented data)
+data/raw/
+
+# Training outputs and weight checkpoints (large; keep out of git)
+runs/
+*.pt
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+*.pyw
+*.pyz
+*.pywz
+*.pyzw
+*.pyzwz
+*.pyzwzw

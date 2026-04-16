@@ -1,0 +1,67 @@
+# YOLO26-S hyperparameter overrides for Elletromil OBB fine-tuning.
+# Merged with Ultralytics defaults; values here take precedence during training.
+
+# Optimizer — MuSGD is a momentum-aware SGD variant tuned for YOLO training stability.
+optimizer: MuSGD
+# momentum — SGD momentum coefficient; keeps updates smooth across noisy mini-batches.
+momentum: 0.937
+# weight_decay — L2 penalty on weights to reduce overfitting on small industrial datasets.
+weight_decay: 0.0005
+
+# Learning rate schedule
+# lr0 — initial learning rate at the start of the schedule (Phase A head-only baseline).
+lr0: 0.001
+# lrf — final LR multiplier; end LR = lr0 * lrf when cosine decay is enabled.
+lrf: 0.01
+# warmup_epochs — linearly ramp LR for this many epochs to stabilize early training.
+warmup_epochs: 3.0
+# warmup_momentum — momentum value at the beginning of warmup before rising to `momentum`.
+warmup_momentum: 0.8
+# warmup_bias_lr — higher LR scale for bias terms during warmup so heads adapt quickly.
+warmup_bias_lr: 0.1
+# cos_lr — cosine annealing from lr0 down to lr0 * lrf across training.
+cos_lr: true
+
+# Loss weights (ProgLoss schedules dynamically; these are base gains)
+# box — localization loss weight (OBB box + angle terms).
+box: 7.5
+# cls — classification loss weight.
+cls: 0.5
+# dfl — YOLO26 removes DFL; set to 0.0 so no distribution focal term is applied.
+dfl: 0.0
+
+# Augmentation — light pass on top of pre-augmented dataset images
+# hsv_h — random hue shift fraction (small to preserve cable/wire colors).
+hsv_h: 0.015
+# hsv_s — saturation jitter to simulate lighting variance.
+hsv_s: 0.7
+# hsv_v — brightness jitter for exposure robustness.
+hsv_v: 0.4
+# degrees — max rotation in degrees for small viewpoint change.
+degrees: 10.0
+# translate — fraction of image size for random shifts.
+translate: 0.1
+# scale — multiplicative scale jitter range.
+scale: 0.5
+# mosaic — probability of mosaic batches (1.0 = always when enabled by trainer).
+mosaic: 1.0
+# mixup — mixup probability for inter-class boundary smoothing.
+mixup: 0.15
+# copy_paste — disabled here (segmentation-oriented); kept explicit for clarity.
+copy_paste: 0.0
+
+# OBB-specific
+# task — oriented bounding box detection head and metrics.
+task: obb
+# overlap_mask — not used for OBB; false avoids mask merge assumptions from segment models.
+overlap_mask: false
+
+# Training stability
+# seed — master RNG seed for reproducibility.
+seed: 42
+# deterministic — prefer deterministic algorithms where supported (may be slower).
+deterministic: true
+# patience — early stopping: stop if no fitness improvement for this many epochs.
+patience: 15
+# save_period — save a checkpoint every N epochs (in addition to best/last).
+save_period: 10
