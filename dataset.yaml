@@ -1,0 +1,13 @@
+path: data/augmented
+train: images/train
+val: images/val
+test: images/test
+task: obb
+nc: 6
+names:
+  0: no_fault
+  1: input_cable_fault
+  2: loose_connection
+  3: output_cable_fault
+  4: signal_cable_fault
+  5: screw_fault

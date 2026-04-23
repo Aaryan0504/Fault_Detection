@@ -1,0 +1,58 @@
+{
+  "checks": [
+    {
+      "details": {
+        "dataset_root": "C:\\Users\\AARYAN\\Desktop\\ups_yolo_with_tagging\\data\\augmented",
+        "missing": []
+      },
+      "name": "paths_exist",
+      "passed": true
+    },
+    {
+      "details": {
+        "mismatches": [],
+        "per_split": {
+          "test": {
+            "extra_label_stems": [],
+            "images": 136,
+            "labels": 136,
+            "missing_label_stems": []
+          },
+          "train": {
+            "extra_label_stems": [],
+            "images": 629,
+            "labels": 629,
+            "missing_label_stems": []
+          },
+          "val": {
+            "extra_label_stems": [],
+            "images": 135,
+            "labels": 135,
+            "missing_label_stems": []
+          }
+        }
+      },
+      "name": "image_label_counts",
+      "passed": true
+    },
+    {
+      "details": {
+        "bad_lines": 0,
+        "examples": [],
+        "total_lines": 750
+      },
+      "name": "label_syntax",
+      "passed": true
+    },
+    {
+      "details": {
+        "checked": 900,
+        "corrupted": []
+      },
+      "name": "images_readable",
+      "passed": true
+    }
+  ],
+  "dataset_root": "C:\\Users\\AARYAN\\Desktop\\ups_yolo_with_tagging\\data\\augmented",
+  "overall_pass": true
+}
