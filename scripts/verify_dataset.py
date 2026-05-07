@@ -1,4 +1,4 @@
-"""Verify augmented YOLO OBB dataset integrity and write a JSON report."""
+"""Verify augmented YOLO detect dataset integrity and write a JSON report."""
 
 from __future__ import annotations
 
@@ -179,12 +179,8 @@ def check_counts_match(cfg: dict[str, Any], dataset_root: Path) -> CheckResult:
     )
 
 
-def validate_label_line(
-    line: str,
-    line_no: int,
-    path: Path,
-) -> tuple[bool, list[str]]:
-    """Validate one Ultralytics OBB line (``cls + 8 xy`` corners, normalized).
+def validate_label_line(line: str, line_no: int, path: Path) -> tuple[bool, list[str]]:
+    """Validate one YOLO detect line (``cls cx cy w h``, normalized).
 
     Args:
         line: One line from a label file.
@@ -197,25 +193,27 @@ def validate_label_line(
 
     issues: list[str] = []
     parts = line.strip().split()
-    if len(parts) != 9:
-        issues.append(f"{path}:{line_no}: expected 9 values (cls + 8 xy), got {len(parts)}")
+    if len(parts) != 5:
+        issues.append(f"{path}:{line_no}: expected 5 values (cls cx cy w h), got {len(parts)}")
         return False, issues
     try:
         cls_id = int(float(parts[0]))
-        coords = [float(x) for x in parts[1:]]
+        cx, cy, w, h = (float(parts[1]), float(parts[2]), float(parts[3]), float(parts[4]))
     except ValueError:
         issues.append(f"{path}:{line_no}: non-numeric values")
         return False, issues
     if cls_id < 0 or cls_id > 5:
         issues.append(f"{path}:{line_no}: class_id {cls_id} not in [0, 5]")
-    for j, val in enumerate(coords):
+    for name, val in (("cx", cx), ("cy", cy), ("w", w), ("h", h)):
         if val < 0.0 or val > 1.0:
-            issues.append(f"{path}:{line_no}: coord[{j}]={val} not in [0, 1]")
+            issues.append(f"{path}:{line_no}: {name}={val} not in [0, 1]")
+    if w <= 0.0 or h <= 0.0:
+        issues.append(f"{path}:{line_no}: w and h must be > 0 (w={w}, h={h})")
     return len(issues) == 0, issues
 
 
 def check_label_syntax(cfg: dict[str, Any], dataset_root: Path) -> CheckResult:
-    """Parse every label file and validate OBB constraints.
+    """Parse every label file and validate YOLO detect constraints.
 
     Args:
         cfg: Parsed ``dataset.yaml``.

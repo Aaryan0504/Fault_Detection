@@ -123,8 +123,9 @@ def render_training_plot(
     axes[0, 1].set_xlabel("epoch")
     axes[0, 1].legend()
 
-    m50 = _safe_series(df, "metrics/mAP50(B)")
-    m5095 = _safe_series(df, "metrics/mAP50-95(B)")
+    # Ultralytics naming differs between detect vs obb; detect commonly uses '(B)' columns.
+    m50 = _safe_series(df, "metrics/mAP50(B)") or _safe_series(df, "metrics/mAP50")
+    m5095 = _safe_series(df, "metrics/mAP50-95(B)") or _safe_series(df, "metrics/mAP50-95")
     if m50 is not None:
         axes[1, 0].plot(epoch, m50, label="mAP50(B)")
     if m5095 is not None:

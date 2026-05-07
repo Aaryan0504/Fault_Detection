@@ -1,4 +1,4 @@
-"""Phase B training: full fine-tune of YOLO26-S OBB model for Elletromil fault detection."""
+"""Phase B training: full fine-tune of YOLO26-S detect model for Elletromil fault detection."""
 
 from __future__ import annotations
 
@@ -16,7 +16,6 @@ import yaml
 from rich.console import Console
 from rich.table import Table
 from ultralytics import YOLO
-from ultralytics.utils.metrics import OBBMetrics
 
 PROJECT_ROOT: Path = Path(__file__).resolve().parent.parent
 DEFAULT_PHASE_A_WEIGHTS: Path = PROJECT_ROOT / "runs" / "phase_a" / "weights" / "best.pt"
@@ -118,11 +117,11 @@ def parse_epochs_trained(results_csv: Path) -> int:
     return len(lines) - 1
 
 
-def build_per_class_ap(metrics: OBBMetrics, class_names: list[str]) -> dict[str, float]:
+def build_per_class_ap(metrics, class_names: list[str]) -> dict[str, float]:  # type: ignore[no-untyped-def]
     """Map each class name to its AP@0.5 (single-class AP vector).
 
     Args:
-        metrics: OBB metrics after validation or training.
+        metrics: Metrics after validation or training.
         class_names: Ordered class names for indices ``0 .. nc-1``.
 
     Returns:
@@ -163,7 +162,7 @@ def run_phase_b(phase_a_weights: Path, dry_run: bool) -> None:
     table.add_column("Field", style="cyan")
     table.add_column("Value", style="white")
     table.add_row("Loaded from", str(phase_a_weights.resolve()))
-    table.add_row("Task", "OBB")
+    table.add_row("Task", "detect")
     table.add_row("Epochs", "100")
     table.add_row("Batch size", "8")
     table.add_row("LR", "1e-4 (cosine decay to 1e-6 via lrf=0.01)")
@@ -177,7 +176,7 @@ def run_phase_b(phase_a_weights: Path, dry_run: bool) -> None:
         "imgsz": 640,
         "batch": 8,
         "freeze": 0,
-        "task": "obb",
+        "task": "detect",
         "cfg": "configs/yolo26s_finetune.yaml",
         "lr0": 0.0001,
         "lrf": 0.01,
@@ -211,14 +210,14 @@ def run_phase_b(phase_a_weights: Path, dry_run: bool) -> None:
         logger.error("Phase B training failed.\n%s", traceback.format_exc())
         raise SystemExit(1) from None
 
-    if not isinstance(metrics, OBBMetrics) or metrics.box.all_ap is None or len(metrics.box.all_ap) == 0:
+    if getattr(metrics, "box", None) is None or getattr(metrics.box, "all_ap", None) is None:
         logger.warning("Final metrics missing; validating best Phase B weights.")
         best_b = PHASE_B_SAVE_DIR / "weights" / "best.pt"
         model_b = YOLO(str(best_b))
         try:
             model_b.val(
                 data=str(DATASET_YAML.resolve()),
-                task="obb",
+                task="detect",
                 imgsz=640,
                 batch=8,
                 split="val",
@@ -229,8 +228,6 @@ def run_phase_b(phase_a_weights: Path, dry_run: bool) -> None:
             logger.error("Fallback validation failed.\n%s", traceback.format_exc())
             raise SystemExit(1) from None
         metrics = model_b.metrics
-        if not isinstance(metrics, OBBMetrics):
-            raise SystemExit("Expected OBBMetrics from fallback validation.")
 
     best_map50 = float(metrics.box.map50)
     best_map50_95 = float(metrics.box.map)
@@ -285,7 +282,7 @@ def parse_args() -> argparse.Namespace:
     Returns:
         Namespace with ``phase_a_weights`` path and ``dry_run`` flag.
     """
-    p = argparse.ArgumentParser(description="Phase B: full fine-tune of OBB model from Phase A weights.")
+    p = argparse.ArgumentParser(description="Phase B: full fine-tune of detect model from Phase A weights.")
     p.add_argument(
         "--phase-a-weights",
         type=Path,

@@ -1,4 +1,4 @@
-# YOLO26-S hyperparameter overrides for Elletromil OBB fine-tuning.
+# YOLO hyperparameter overrides for detect fine-tuning.
 # Merged with Ultralytics defaults; values here take precedence during training.
 
 # Optimizer — MuSGD is a momentum-aware SGD variant tuned for YOLO training stability.
@@ -23,7 +23,7 @@ warmup_bias_lr: 0.1
 cos_lr: true
 
 # Loss weights (ProgLoss schedules dynamically; these are base gains)
-# box — localization loss weight (OBB box + angle terms).
+# box — localization loss weight.
 box: 7.5
 # cls — classification loss weight.
 cls: 0.5
@@ -50,11 +50,8 @@ mixup: 0.15
 # copy_paste — disabled here (segmentation-oriented); kept explicit for clarity.
 copy_paste: 0.0
 
-# OBB-specific
-# task — oriented bounding box detection head and metrics.
-task: obb
-# overlap_mask — not used for OBB; false avoids mask merge assumptions from segment models.
-overlap_mask: false
+# Detection task (axis-aligned bounding boxes)
+task: detect
 
 # Training stability
 # seed — master RNG seed for reproducibility.

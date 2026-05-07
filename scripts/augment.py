@@ -1,4 +1,4 @@
-"""Augment raw transformer fault images and labels for YOLO OBB training."""
+"""Augment raw transformer fault images and labels for YOLO detect training."""
 
 from __future__ import annotations
 
@@ -9,8 +9,6 @@ import logging
 import math
 import random
 import shutil
-from dataclasses import dataclass
-from math import ceil
 from pathlib import Path
 from typing import Any
 
@@ -18,7 +16,6 @@ import albumentations as A
 import cv2
 import numpy as np
 import yaml
-from sklearn.model_selection import train_test_split
 from tqdm import tqdm
 
 LOGGER = logging.getLogger(__name__)
@@ -28,47 +25,20 @@ RAW_ROOT = PROJECT_ROOT / "data" / "raw"
 AUG_ROOT = PROJECT_ROOT / "data" / "augmented"
 DATASET_YAML = PROJECT_ROOT / "dataset.yaml"
 
-CLASS_FOLDERS: list[tuple[str, int]] = [
-    ("no_fault", 0),
-    ("input_cable_fault", 1),
-    ("loose_connection", 2),
-    ("output_cable_fault", 3),
-    ("signal_cable_fault", 4),
-    ("screw_fault", 5),
-]
+RAW_IMAGES_ROOT = RAW_ROOT / "Images"
+RAW_LABELS_ROOT = RAW_ROOT / "labels"
 
 IMAGE_EXTENSIONS = {".jpg", ".jpeg", ".png"}
 
-# Lower default keeps Phase B training/validation feasible on modest hardware;
-# override with ``python scripts/augment.py --target-per-class N``.
-DEFAULT_TARGET_PER_CLASS = 150
-TRAIN_FRAC = 0.70
+# Default augmentation multiplier for the *training* split.
+# Total training images written will be approximately (1 + aug_per_image) * N_train_raw.
+DEFAULT_AUG_PER_IMAGE = 5
 RANDOM_STATE = 42
 
 # Raw photos are often very high resolution; Albumentations allocates multiple
 # full-size buffers per step (flip, rotate, warp). Cap the long edge before
-# augmenting to avoid OpenCV (-4: Insufficient memory). Normalized YOLO OBB
-# labels stay valid under uniform scaling.
+# augmenting to avoid OpenCV (-4: Insufficient memory).
 MAX_INPUT_LONG_EDGE = 2048
-
-
-@dataclass(frozen=True)
-class AugmentedSample:
-    """One augmented image/label pair ready for disk export.
-
-    Attributes:
-        fault_class: Integer fault class id (0-5) from the source folder.
-        image_bgr: Augmented image in BGR uint8, shape (H, W, 3).
-        label_lines: List of YOLO OBB lines as strings without newline.
-        source_image_path: Original raw image path (for traceability).
-        aug_index: Augmentation index for this source image.
-    """
-
-    fault_class: int
-    image_bgr: np.ndarray
-    label_lines: list[str]
-    source_image_path: Path
-    aug_index: int
 
 
 def get_project_root() -> Path:
@@ -102,9 +72,7 @@ def _build_gauss_noise(p: float) -> Any:
 def build_augmentation_pipeline() -> A.Compose:
     """Create the Albumentations pipeline specified for this project.
 
-    Oriented boxes are represented as four corner keypoints (pixel ``xy``)
-    plus an axis-aligned YOLO ``[cx, cy, w, h]`` proxy derived from the
-    oriented box, with ``BboxParams`` configured as required.
+    Uses YOLO axis-aligned bboxes (``[cx, cy, w, h]`` normalized).
 
     Returns:
         A composed Albumentations transform.
@@ -113,9 +81,6 @@ def build_augmentation_pipeline() -> A.Compose:
     return A.Compose(
         [
             A.HorizontalFlip(p=0.5),
-            # BORDER_REFLECT makes Albumentations 2.x replicate keypoints on a reflection
-            # grid (~9× the input points), which breaks single-OBB labels. REPLICATE avoids
-            # that while still filling rotated edges sensibly.
             A.Rotate(limit=20, border_mode=cv2.BORDER_REPLICATE, p=0.7),
             A.ColorJitter(
                 brightness=0.3,
@@ -137,88 +102,39 @@ def build_augmentation_pipeline() -> A.Compose:
             clip=True,
             check_each_transform=False,
         ),
-        keypoint_params=A.KeypointParams(
-            format="xy",
-            label_fields=["kp_class_labels"],
-            remove_invisible=False,
-            check_each_transform=False,
-        ),
     )
 
 
-def obb_to_corner_keypoints(
-    cx: float,
-    cy: float,
-    w: float,
-    h: float,
-    angle_deg: float,
-    image_height: int,
-    image_width: int,
-) -> np.ndarray:
-    """Convert a normalized YOLO OBB to four corner points in pixel coordinates.
+def parse_label_lines(text: str) -> list[tuple[int, tuple[float, float, float, float]]]:
+    """Parse raw label text into YOLO detect bboxes.
 
-    Args:
-        cx: Normalized x center in ``[0, 1]``.
-        cy: Normalized y center in ``[0, 1]``.
-        w: Normalized width in ``[0, 1]``.
-        h: Normalized height in ``[0, 1]``.
-        angle_deg: Rotation angle in degrees (OpenCV ``minAreaRect`` convention).
-        image_height: Image height in pixels.
-        image_width: Image width in pixels.
+    This project is now **detect-only**: raw labels must be in 5-field YOLO format:
+    ``class cx cy w h`` (all normalized to [0, 1]).
 
-    Returns:
-        Float32 array with shape ``(4, 2)`` of corner ``(x, y)`` in pixels.
-    """
-
-    c_x = float(cx) * image_width
-    c_y = float(cy) * image_height
-    rect_w = float(w) * image_width
-    rect_h = float(h) * image_height
-    rect = ((c_x, c_y), (rect_w, rect_h), float(angle_deg))
-    pts = cv2.boxPoints(rect)
-    return pts.astype(np.float32)
-
-
-def parse_obb_label_lines(text: str) -> list[tuple[int, np.ndarray]]:
-    """Parse raw label text into per-object normalized quadrilaterals.
-
-    Supports Ultralytics OBB format (``class x1 y1 x2 y2 x3 y3 x4 y4``,9 fields)
-    and legacy center format (``class cx cy w h angle``, 6 fields).
+    Any rotated-box label line (legacy 6-field or 9-field quadrilateral formats) is treated
+    as a hard error to avoid silently generating incorrect training labels.
 
     Args:
         text: Full contents of a label ``.txt`` file.
 
     Returns:
-        List of ``(class_id, corners)`` where ``corners`` is float32 ``(4, 2)``
-        with ``xy`` normalized to ``[0, 1]``.
+        List of ``(class_id, (cx, cy, w, h))`` with values normalized to ``[0, 1]``.
     """
 
-    objects: list[tuple[int, np.ndarray]] = []
+    objects: list[tuple[int, tuple[float, float, float, float]]] = []
     for raw_line in text.splitlines():
         line = raw_line.strip()
         if not line:
             continue
         parts = line.split()
-        if len(parts) == 9:
+        if len(parts) == 5:
             cls_id = int(float(parts[0]))
-            coords = np.array([float(x) for x in parts[1:]], dtype=np.float32).reshape(4, 2)
-            objects.append((cls_id, coords))
-        elif len(parts) == 6:
-            cls_id = int(float(parts[0]))
-            cx, cy, w, h, ang = (
-                float(parts[1]),
-                float(parts[2]),
-                float(parts[3]),
-                float(parts[4]),
-                float(parts[5]),
-            )
-            corners = obb_to_corner_keypoints(cx, cy, w, h, ang, 1, 1)
-            objects.append((cls_id, corners.astype(np.float32)))
+            cx, cy, w, h = (float(parts[1]), float(parts[2]), float(parts[3]), float(parts[4]))
+            objects.append((cls_id, (cx, cy, w, h)))
         else:
-            LOGGER.warning(
-                "Skipping malformed label line (expected 9 or 6 values, got %d): %s",
-                len(parts),
-                line,
+            raise ValueError(
+                "Unsupported label format: expected 5 values per line (cls cx cy w h). "
+                f"Got {len(parts)} values: '{line}'."
             )
     return objects
 
@@ -286,16 +202,15 @@ def derive_augmentation_seed(fault_class: int, image_path: Path, aug_index: int)
 
 def augment_image_with_labels(
     image_bgr: np.ndarray,
-    obb_objects: list[tuple[int, np.ndarray]],
+    objects: list[tuple[int, tuple[float, float, float, float]]],
     transform: A.Compose,
     rng_seed: int,
 ) -> tuple[np.ndarray, list[str]] | None:
-    """Run the augmentation pipeline and produce new YOLO OBB label lines.
+    """Run the augmentation pipeline and produce new YOLO detect label lines.
 
     Args:
         image_bgr: Source image in BGR format.
-        obb_objects: List of ``(class_id, corners)`` with ``corners`` shape ``(4, 2)``
-            in normalized ``xy``; may be empty for background images.
+        objects: List of ``(class_id, (cx, cy, w, h))`` normalized; may be empty for background images.
         transform: Albumentations compose pipeline.
         rng_seed: Seed controlling stochastic transforms for this call.
 
@@ -308,26 +223,10 @@ def augment_image_with_labels(
 
     bboxes: list[list[float]] = []
     class_labels: list[int] = []
-    keypoints: list[list[float]] = []
-    kp_class_labels: list[int] = []
 
-    for cls_id, corners_norm in obb_objects:
-        corners_px = corners_norm.astype(np.float64).copy()
-        corners_px[:, 0] *= float(width)
-        corners_px[:, 1] *= float(height)
-        xs = corners_px[:, 0]
-        ys = corners_px[:, 1]
-        x_min, x_max = float(np.min(xs)), float(np.max(xs))
-        y_min, y_max = float(np.min(ys)), float(np.max(ys))
-        bcx = ((x_min + x_max) * 0.5) / float(width)
-        bcy = ((y_min + y_max) * 0.5) / float(height)
-        bnw = (x_max - x_min) / float(width)
-        bnh = (y_max - y_min) / float(height)
-        bboxes.append([bcx, bcy, bnw, bnh])
+    for cls_id, (cx, cy, w_n, h_n) in objects:
+        bboxes.append([float(cx), float(cy), float(w_n), float(h_n)])
         class_labels.append(int(cls_id))
-        for pt in corners_px:
-            keypoints.append([float(pt[0]), float(pt[1])])
-            kp_class_labels.append(int(cls_id))
 
     random.seed(rng_seed)
     np.random.seed(rng_seed)
@@ -337,8 +236,6 @@ def augment_image_with_labels(
             image=image_rgb,
             bboxes=bboxes,
             class_labels=class_labels,
-            keypoints=keypoints,
-            kp_class_labels=kp_class_labels,
         )
     except Exception:
         LOGGER.exception("Augmentation failed; skipping sample.")
@@ -348,35 +245,27 @@ def augment_image_with_labels(
     aug_h, aug_w = aug_rgb.shape[:2]
     aug_bgr = cv2.cvtColor(aug_rgb, cv2.COLOR_RGB2BGR)
 
-    if not obb_objects:
+    if not objects:
         return aug_bgr, []
 
-    kp_out = out.get("keypoints")
-    labels_out = out.get("kp_class_labels")
-    if not kp_out or len(kp_out) % 4 != 0:
-        LOGGER.warning("Augmentation dropped or mangled keypoints; skipping sample.")
-        return None
-    if not labels_out or len(labels_out) != len(kp_out):
-        LOGGER.warning(
-            "Augmentation keypoint labels missing or length mismatch "
-            "(keypoints=%d, labels=%s); skipping sample.",
-            len(kp_out),
-            len(labels_out) if labels_out is not None else None,
-        )
+    bboxes_out = out.get("bboxes")
+    labels_out = out.get("class_labels")
+    if not bboxes_out or labels_out is None or len(labels_out) != len(bboxes_out):
+        LOGGER.warning("Augmentation dropped all boxes or labels mismatched; skipping sample.")
         return None
 
     new_lines: list[str] = []
-    for i in range(0, len(kp_out), 4):
-        quad = np.asarray(kp_out[i : i + 4], dtype=np.float32)
-        cls_kp = int(labels_out[i])
-        nx = np.clip(quad[:, 0] / float(aug_w), 0.0, 1.0)
-        ny = np.clip(quad[:, 1] / float(aug_h), 0.0, 1.0)
-        flat = np.stack([nx, ny], axis=1).reshape(-1)
-        coord_str = " ".join(f"{float(v):.6f}" for v in flat)
-        new_lines.append(f"{cls_kp} {coord_str}")
+    for (cx, cy, w_n, h_n), cls_id in zip(bboxes_out, labels_out, strict=False):
+        cx_f = float(np.clip(cx, 0.0, 1.0))
+        cy_f = float(np.clip(cy, 0.0, 1.0))
+        w_f = float(np.clip(w_n, 0.0, 1.0))
+        h_f = float(np.clip(h_n, 0.0, 1.0))
+        if w_f <= 0.0 or h_f <= 0.0:
+            continue
+        new_lines.append(f"{int(cls_id)} {cx_f:.6f} {cy_f:.6f} {w_f:.6f} {h_f:.6f}")
 
     if not new_lines:
-        LOGGER.warning("All OBB boxes invalid after augmentation; skipping sample.")
+        LOGGER.warning("All boxes invalid after augmentation; skipping sample.")
         return None
 
     return aug_bgr, new_lines
@@ -386,7 +275,7 @@ def discover_raw_images(class_dir: Path) -> list[Path]:
     """List all raw images for one class directory.
 
     Args:
-        class_dir: Path like ``data/raw/no_fault``.
+        class_dir: Directory containing images.
 
     Returns:
         Sorted list of image paths.
@@ -402,7 +291,7 @@ def discover_raw_images(class_dir: Path) -> list[Path]:
 
 
 def resolve_label_path(image_path: Path) -> Path:
-    """Return the sibling label path ``labels/<stem>.txt`` for a raw image.
+    """Resolve raw label path for a raw image under ``data/raw/Images/<split>``.
 
     Args:
         image_path: Path to a raw image inside a class folder.
@@ -411,7 +300,8 @@ def resolve_label_path(image_path: Path) -> Path:
         Path to the expected label file.
     """
 
-    return image_path.parent / "labels" / f"{image_path.stem}.txt"
+    split = image_path.parent.name
+    return RAW_LABELS_ROOT / split / f"{image_path.stem}.txt"
 
 
 def prepare_output_dirs() -> None:
@@ -437,235 +327,168 @@ def write_dataset_yaml() -> None:
         "train": "images/train",
         "val": "images/val",
         "test": "images/test",
-        "task": "obb",
+        "task": "detect",
         "nc": 6,
         "names": {
-            0: "no_fault",
-            1: "input_cable_fault",
-            2: "loose_connection",
-            3: "output_cable_fault",
-            4: "signal_cable_fault",
+            0: "input_cable_fault",
+            1: "loose_connection",
+            2: "output_cable_fault",
+            3: "ri_cable_mismatch",
+            4: "signal_cable_mismatch",
             5: "screw_fault",
         },
     }
     DATASET_YAML.write_text(yaml.safe_dump(cfg, sort_keys=False), encoding="utf-8")
 
+def list_split_images(split: str) -> list[Path]:
+    """List all raw images for a split under ``data/raw/Images/<split>``."""
+    split_dir = RAW_IMAGES_ROOT / split
+    if not split_dir.is_dir():
+        return []
+    paths: list[Path] = []
+    for p in split_dir.iterdir():
+        if p.is_file() and p.suffix.lower() in IMAGE_EXTENSIONS:
+            paths.append(p)
+    return sorted(paths)
 
-def augment_class_folder(
-    folder_name: str,
-    fault_class: int,
-    transform: A.Compose,
-    target_per_class: int,
-) -> tuple[int, int, list[AugmentedSample]]:
-    """Augment all images for one fault-class folder.
+def _write_sample(image_bgr: np.ndarray, label_lines: list[str], out_img: Path, out_lbl: Path) -> None:
+    out_img.parent.mkdir(parents=True, exist_ok=True)
+    out_lbl.parent.mkdir(parents=True, exist_ok=True)
+    if not cv2.imwrite(str(out_img), image_bgr):
+        raise RuntimeError(f"Failed to write image {out_img}")
+    out_lbl.write_text(("\n".join(label_lines) + ("\n" if label_lines else "")), encoding="utf-8")
 
-    Args:
-        folder_name: Subfolder name under ``data/raw``.
-        fault_class: Integer class id for this folder.
-        transform: Albumentations pipeline.
-        target_per_class: Cap on augmented samples for this class.
 
-    Returns:
-        ``(raw_count, target_generated, samples)`` where ``samples`` length is
-        exactly ``target_per_class`` when ``raw_count > 0`` and enough augments succeed.
-    """
-
-    class_dir = RAW_ROOT / folder_name
-    images = discover_raw_images(class_dir)
-    raw_count = len(images)
-    if raw_count == 0:
-        LOGGER.error("No raw images found in %s", class_dir)
-        return 0, 0, []
-
-    multiplier = int(ceil(target_per_class / float(raw_count)))
-    samples: list[AugmentedSample] = []
-
-    for image_path in tqdm(images, desc=f"Augment {folder_name}", unit="img"):
+def copy_split(split: str) -> int:
+    """Copy raw split images/labels to augmented output without augmentation."""
+    images = list_split_images(split)
+    out_img_dir = AUG_ROOT / "images" / split
+    out_lbl_dir = AUG_ROOT / "labels" / split
+    written = 0
+    for image_path in tqdm(images, desc=f"Copy {split}", unit="img"):
         label_path = resolve_label_path(image_path)
         if not label_path.is_file():
-            LOGGER.warning("Missing label file for %s; skipping image.", image_path)
+            LOGGER.warning("Missing label file for %s; skipping.", image_path)
             continue
-
         label_text = label_path.read_text(encoding="utf-8", errors="replace").strip()
-        if label_text == "":
-            obb_objects: list[tuple[int, float, float, float, float, float]] = []
-        else:
-            obb_objects = parse_obb_label_lines(label_text)
+        try:
+            objects = [] if label_text == "" else parse_label_lines(label_text)
+        except ValueError as exc:
+            raise SystemExit(f"Label format error in {label_path}: {exc}") from None
+        # Preserve empty labels (background) by writing an empty file.
+        label_lines = (
+            [f"{cid} {cx:.6f} {cy:.6f} {w_n:.6f} {h_n:.6f}" for cid, (cx, cy, w_n, h_n) in objects]
+            if objects
+            else []
+        )
+
+        image_bgr = read_image_bgr(image_path)
+        if image_bgr is None:
+            LOGGER.error("Failed to read %s; skipping.", image_path)
+            continue
+        image_bgr = downscale_bgr_if_needed(image_bgr, MAX_INPUT_LONG_EDGE)
+        out_img = out_img_dir / f"{image_path.stem}.png"
+        out_lbl = out_lbl_dir / f"{image_path.stem}.txt"
+        _write_sample(image_bgr, label_lines, out_img, out_lbl)
+        written += 1
+    return written
+
+def augment_train_split(transform: A.Compose, aug_per_image: int) -> int:
+    """Write train split: copy originals + write augmented variants (train only)."""
+    images = list_split_images("train")
+    out_img_dir = AUG_ROOT / "images" / "train"
+    out_lbl_dir = AUG_ROOT / "labels" / "train"
+    written = 0
+
+    for image_path in tqdm(images, desc="Augment train", unit="img"):
+        label_path = resolve_label_path(image_path)
+        if not label_path.is_file():
+            LOGGER.warning("Missing label file for %s; skipping.", image_path)
+            continue
+        label_text = label_path.read_text(encoding="utf-8", errors="replace").strip()
+        try:
+            objects = [] if label_text == "" else parse_label_lines(label_text)
+        except ValueError as exc:
+            raise SystemExit(f"Label format error in {label_path}: {exc}") from None
+
+        base_lines = (
+            [f"{cid} {cx:.6f} {cy:.6f} {w_n:.6f} {h_n:.6f}" for cid, (cx, cy, w_n, h_n) in objects]
+            if objects
+            else []
+        )
 
         image_bgr = read_image_bgr(image_path)
         if image_bgr is None:
             LOGGER.error("Failed to read image %s; skipping.", image_path)
             continue
-
         image_bgr = downscale_bgr_if_needed(image_bgr, MAX_INPUT_LONG_EDGE)
         gc.collect()
 
-        for aug_idx in range(multiplier):
-            seed = derive_augmentation_seed(fault_class, image_path, aug_idx)
-            result = augment_image_with_labels(image_bgr, obb_objects, transform, seed)
+        # 1) Always write the original (normalized to PNG, labels re-written).
+        out_img = out_img_dir / f"{image_path.stem}.png"
+        out_lbl = out_lbl_dir / f"{image_path.stem}.txt"
+        _write_sample(image_bgr, base_lines, out_img, out_lbl)
+        written += 1
+
+        # 2) Write augmented variants.
+        # Use class_id from the first object if present; else use 0 for seeding.
+        seed_class = int(objects[0][0]) if objects else 0
+        for aug_idx in range(int(aug_per_image)):
+            seed = derive_augmentation_seed(seed_class, image_path, aug_idx)
+            result = augment_image_with_labels(image_bgr, objects, transform, seed)
             if result is None:
                 continue
             aug_bgr, lines = result
-            samples.append(
-                AugmentedSample(
-                    fault_class=fault_class,
-                    image_bgr=aug_bgr,
-                    label_lines=lines,
-                    source_image_path=image_path,
-                    aug_index=aug_idx,
-                ),
-            )
+            aug_stem = f"{image_path.stem}_aug{aug_idx:02d}"
+            out_img_a = out_img_dir / f"{aug_stem}.png"
+            out_lbl_a = out_lbl_dir / f"{aug_stem}.txt"
+            _write_sample(aug_bgr, lines, out_img_a, out_lbl_a)
+            written += 1
 
-    if len(samples) > target_per_class:
-        rng = np.random.default_rng(RANDOM_STATE)
-        pick = rng.choice(len(samples), size=target_per_class, replace=False)
-        pick_sorted = sorted(int(x) for x in pick.tolist())
-        samples = [samples[i] for i in pick_sorted]
-    elif len(samples) < target_per_class:
-        LOGGER.warning(
-            "Class %s produced only %d samples (target %d).",
-            folder_name,
-            len(samples),
-            target_per_class,
-        )
-
-    return raw_count, len(samples), samples
-
-
-def split_and_save_samples(all_samples: list[AugmentedSample]) -> dict[str, dict[str, int]]:
-    """Stratify-split combined samples and write PNG images and YOLO labels.
-
-    Args:
-        all_samples: Augmented samples from all classes.
-
-    Returns:
-        Nested counts ``counts[split][class_or_total]`` for summary printing.
-    """
-
-    if not all_samples:
-        return {}
-
-    indices = np.arange(len(all_samples), dtype=np.int64)
-    y = np.asarray([s.fault_class for s in all_samples], dtype=np.int64)
-
-    idx_train, idx_temp = train_test_split(
-        indices,
-        test_size=(1.0 - TRAIN_FRAC),
-        stratify=y,
-        random_state=RANDOM_STATE,
-    )
-    y_temp = y[idx_temp]
-    val_fraction_of_temp = 0.5
-    idx_val, idx_test = train_test_split(
-        idx_temp,
-        test_size=(1.0 - val_fraction_of_temp),
-        stratify=y_temp,
-        random_state=RANDOM_STATE,
-    )
-
-    split_to_indices = {
-        "train": idx_train.tolist(),
-        "val": idx_val.tolist(),
-        "test": idx_test.tolist(),
-    }
-
-    counts: dict[str, dict[str, int]] = {
-        "train": {"total": 0},
-        "val": {"total": 0},
-        "test": {"total": 0},
-    }
-    for split_name in counts:
-        for _, cid in CLASS_FOLDERS:
-            counts[split_name][str(cid)] = 0
-
-    global_index = 0
-    for split_name, idx_list in split_to_indices.items():
-        img_dir = AUG_ROOT / "images" / split_name
-        lbl_dir = AUG_ROOT / "labels" / split_name
-        for i in idx_list:
-            sample = all_samples[int(i)]
-            stem = f"sample_{global_index:06d}"
-            global_index += 1
-            img_path = img_dir / f"{stem}.png"
-            lbl_path = lbl_dir / f"{stem}.txt"
-            if not cv2.imwrite(str(img_path), sample.image_bgr):
-                LOGGER.error("Failed to write image %s", img_path)
-                continue
-            lbl_path.write_text(
-                ("\n".join(sample.label_lines) + ("\n" if sample.label_lines else "")),
-                encoding="utf-8",
-            )
-            counts[split_name]["total"] += 1
-            counts[split_name][str(sample.fault_class)] += 1
-
-    return counts
-
-
-def print_summary_table(rows: list[tuple[str, int, int, int, int, int]]) -> None:
-    """Print the augmentation summary table to stdout.
-
-    Args:
-        rows: Rows of
-            ``(class_name, raw_count, augmented, train, val, test)``.
-    """
-
-    header = f"{'Class':<22} | {'Raw':>5} | {'Aug':>5} | {'Train':>5} | {'Val':>5} | {'Test':>5}"
-    print(header)
-    print("-" * len(header))
-    for name, raw_c, aug_c, tr, va, te in rows:
-        print(f"{name:<22} | {raw_c:5d} | {aug_c:5d} | {tr:5d} | {va:5d} | {te:5d}")
+    return written
 
 
 def main() -> None:
-    """Run full dataset preparation: augment, split, save, and update ``dataset.yaml``."""
+    """Run dataset preparation for detect: augment train only, keep val/test real."""
 
     parser = argparse.ArgumentParser(
-        description="Augment raw Electromil images into a YOLO OBB dataset under data/augmented.",
+        description=(
+            "Augment raw images into a YOLO detect dataset under data/augmented. "
+            "Train split is augmented; val/test are copied through unchanged."
+        ),
     )
     parser.add_argument(
-        "--target-per-class",
+        "--aug-per-image",
         type=int,
-        default=DEFAULT_TARGET_PER_CLASS,
-        metavar="N",
+        default=DEFAULT_AUG_PER_IMAGE,
+        metavar="K",
         help=(
-            "Maximum augmented samples per fault class after stratified split inputs "
-            f"(default: {DEFAULT_TARGET_PER_CLASS})."
+            "Number of augmented variants to generate per *train* image (default: "
+            f"{DEFAULT_AUG_PER_IMAGE}). Total train images will be roughly (1+K)*N."
         ),
     )
     args = parser.parse_args()
-    if args.target_per_class < 1:
-        raise SystemExit("--target-per-class must be >= 1")
+    if args.aug_per_image < 0:
+        raise SystemExit("--aug-per-image must be >= 0")
 
     logging.basicConfig(level=logging.INFO, format="%(levelname)s:%(name)s:%(message)s")
     prepare_output_dirs()
     transform = build_augmentation_pipeline()
 
-    per_class_samples: list[tuple[str, int, int, list[AugmentedSample]]] = []
-    all_samples: list[AugmentedSample] = []
+    if not RAW_IMAGES_ROOT.is_dir():
+        raise SystemExit(f"Missing raw images folder: {RAW_IMAGES_ROOT}")
+    if not RAW_LABELS_ROOT.is_dir():
+        raise SystemExit(f"Missing raw labels folder: {RAW_LABELS_ROOT}")
 
-    for folder_name, fault_class in CLASS_FOLDERS:
-        raw_c, aug_c, samples = augment_class_folder(
-            folder_name,
-            fault_class,
-            transform,
-            target_per_class=args.target_per_class,
-        )
-        per_class_samples.append((folder_name, raw_c, aug_c, samples))
-        all_samples.extend(samples)
-
-    split_counts = split_and_save_samples(all_samples)
+    n_train = augment_train_split(transform, aug_per_image=args.aug_per_image)
+    n_val = copy_split("val")
+    n_test = copy_split("test")
 
     write_dataset_yaml()
-
-    summary_rows: list[tuple[str, int, int, int, int, int]] = []
-    for folder_name, raw_c, aug_c, samples in per_class_samples:
-        fault_class = next(cid for fname, cid in CLASS_FOLDERS if fname == folder_name)
-        tr = split_counts.get("train", {}).get(str(fault_class), 0) if split_counts else 0
-        va = split_counts.get("val", {}).get(str(fault_class), 0) if split_counts else 0
-        te = split_counts.get("test", {}).get(str(fault_class), 0) if split_counts else 0
-        summary_rows.append((folder_name, raw_c, aug_c, tr, va, te))
-
-    print_summary_table(summary_rows)
+    print(f"Wrote augmented dataset to {AUG_ROOT}")
+    print(f"train written: {n_train} (includes originals + augmented)")
+    print(f"val copied:   {n_val} (no augmentation)")
+    print(f"test copied:  {n_test} (no augmentation)")
 
 
 if __name__ == "__main__":

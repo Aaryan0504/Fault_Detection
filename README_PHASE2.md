@@ -1,6 +1,6 @@
-# Phase 2 — YOLO26 model configuration and two-phase training
+# Phase 2 — YOLO model configuration and two-phase training (detect)
 
-This phase trains an oriented bounding box (OBB) detector for the six Elletromil fault classes on top of the Phase 1 dataset under `data/augmented/`.
+This phase trains a **YOLO detect** model for the six transformer terminal fault classes on top of the Phase 1 dataset under `data/augmented/`.
 
 ## Prerequisites
 
@@ -11,7 +11,7 @@ This phase trains an oriented bounding box (OBB) detector for the six Elletromil
 
 ## Layout (created or used in Phase 2)
 
-- `configs/yolo26s_finetune.yaml` — hyperparameter overrides (MuSGD, cosine LR, light aug, `dfl: 0.0`, `task: obb`).
+- `configs/yolo26s_finetune.yaml` — hyperparameter overrides (MuSGD, cosine LR, light aug, `dfl: 0.0`, `task: detect`).
 - `scripts/train_phase_a.py` — freeze backbone (10 layers), train head ~20 epochs.
 - `scripts/train_phase_b.py` — unfreeze all, full fine-tune up to 100 epochs with early stopping.
 - `scripts/monitor_training.py` — live plots from `results.csv`.
@@ -54,7 +54,7 @@ python scripts/validate_model.py --weights runs/phase_b/weights/best.pt --split 
 
 ## Why two-phase training?
 
-On a **small, specialized dataset**, training all layers from the start often **overfits** or **destroys** useful COCO features in the backbone. **Phase A** freezes most of the network and adapts the **detection/OBB head** with a moderate learning rate so class boundaries stabilize. **Phase B** then unfreezes the full model with a **lower LR** so the backbone can refine features without wiping out the head. This is a standard transfer-learning pattern for limited industrial data.
+On a **small, specialized dataset**, training all layers from the start often **overfits** or **destroys** useful COCO features in the backbone. **Phase A** freezes most of the network and adapts the detection head with a moderate learning rate so class boundaries stabilize. **Phase B** then unfreezes the full model with a lower LR so the backbone can refine features without wiping out the head. This is a standard transfer-learning pattern for limited industrial data.
 
 ## Interpreting evaluation outputs (`runs/evaluation/`)
 
@@ -78,7 +78,7 @@ On a **small, specialized dataset**, training all layers from the start often **
 
 ## GPU memory (guidance)
 
-Approximate VRAM for YOLO26-S OBB at 640×640:
+Approximate VRAM depends on GPU + batch size. Start with defaults and lower `batch` if you hit OOM.
 
 | Batch | Phase | Approx. VRAM |
 |-------|--------|----------------|
@@ -91,15 +91,13 @@ If you hit OOM, edit the `batch=` argument in the corresponding script (or pass 
 ## When a class fails (mAP50 &lt; 0.6)
 
 1. **Collect more real images** for that fault mode (lighting, angles, wiring variants).
-2. **Audit labels** for that class (OBB points, class id, missed objects).
+2. **Audit labels** for that class (class id, missed objects, bbox tightness).
 3. **Increase class-aware augmentation** in Phase 1 or bump relevant HSV/geometry gains in `configs/yolo26s_finetune.yaml` cautiously.
 
-## YOLO26-specific notes
+## Notes
 
-- **NMS-free / end-to-end inference** options exist in YOLO26; validation still reports standard OBB metrics.
-- **`dfl: 0.0`** matches the YOLO26 setup where the distribution focal loss term is not used; box loss is handled by the updated head.
-- **`task: obb`** selects rotated boxes and `OBBMetrics` (e.g. `metrics/mAP50(B)` in `results.csv`).
-- **`optimizer: MuSGD`** is the momentum SGD variant recommended in the Ultralytics stack for these models.
+- Phase A starts from **`yolo11m.pt`** (see `scripts/train_phase_a.py`).
+- `task: detect` uses standard axis-aligned boxes and standard box metrics.
 
 ## Monitoring training
 

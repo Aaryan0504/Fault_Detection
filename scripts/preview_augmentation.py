@@ -1,4 +1,4 @@
-"""Preview augmentation by drawing OBB boxes before/after for one image per class."""
+"""Preview augmentation by drawing detect boxes before/after for one image per class."""
 
 from __future__ import annotations
 
@@ -31,12 +31,16 @@ CLASS_COLORS_BGR: list[tuple[int, int, int]] = [
 ]
 
 
-def draw_yolo_obb_lines(image_bgr: np.ndarray, label_text: str, palette: list[tuple[int, int, int]]) -> np.ndarray:
-    """Draw all YOLO OBB objects from label text onto a BGR image copy.
+def draw_yolo_detect_lines(
+    image_bgr: np.ndarray,
+    label_text: str,
+    palette: list[tuple[int, int, int]],
+) -> np.ndarray:
+    """Draw YOLO detect bboxes from label text onto a BGR image copy.
 
     Args:
         image_bgr: Source image in BGR format.
-        label_text: Newline-separated YOLO OBB label lines (may be empty).
+        label_text: Newline-separated YOLO detect label lines (may be empty).
         palette: List of BGR colors indexed by class id.
 
     Returns:
@@ -54,30 +58,18 @@ def draw_yolo_obb_lines(image_bgr: np.ndarray, label_text: str, palette: list[tu
         parts = line.split()
         cls_id = int(float(parts[0]))
         color = palette[cls_id % len(palette)]
-        if len(parts) == 9:
-            coords = np.array([float(x) for x in parts[1:]], dtype=np.float32).reshape(4, 2)
-            pts = np.stack(
-                [coords[:, 0] * w, coords[:, 1] * h],
-                axis=1,
-            ).astype(np.int32)
-            cv2.drawContours(canvas, [pts], 0, color, 2)
-        elif len(parts) == 6:
-            cx, cy, bw, bh, ang = (
-                float(parts[1]),
-                float(parts[2]),
-                float(parts[3]),
-                float(parts[4]),
-                float(parts[5]),
-            )
-            c_x = cx * w
-            c_y = cy * h
-            rw = bw * w
-            rh = bh * h
-            box = ((float(c_x), float(c_y)), (float(rw), float(rh)), float(ang))
-            pts = cv2.boxPoints(box).astype(np.int32)
-            cv2.drawContours(canvas, [pts], 0, color, 2)
-        else:
+        if len(parts) != 5:
             continue
+        cx, cy, bw, bh = (float(parts[1]), float(parts[2]), float(parts[3]), float(parts[4]))
+        x1 = int(round((cx - bw / 2.0) * w))
+        y1 = int(round((cy - bh / 2.0) * h))
+        x2 = int(round((cx + bw / 2.0) * w))
+        y2 = int(round((cy + bh / 2.0) * h))
+        x1 = max(0, min(w - 1, x1))
+        y1 = max(0, min(h - 1, y1))
+        x2 = max(0, min(w - 1, x2))
+        y2 = max(0, min(h - 1, y2))
+        cv2.rectangle(canvas, (x1, y1), (x2, y2), color, 2)
     return canvas
 
 
@@ -85,7 +77,7 @@ def pick_first_raw_image(class_dir: Path) -> Path | None:
     """Return the first sorted raw image path in a class directory, if any.
 
     Args:
-        class_dir: Path such as ``data/raw/no_fault``.
+        class_dir: Directory containing raw images.
 
     Returns:
         Path to an image or ``None`` if none exist.
@@ -134,8 +126,8 @@ def build_side_by_side(
         A single BGR image with both panels side-by-side.
     """
 
-    left = draw_yolo_obb_lines(original_bgr, original_labels, CLASS_COLORS_BGR)
-    right = draw_yolo_obb_lines(augmented_bgr, "\n".join(augmented_label_lines), CLASS_COLORS_BGR)
+    left = draw_yolo_detect_lines(original_bgr, original_labels, CLASS_COLORS_BGR)
+    right = draw_yolo_detect_lines(augmented_bgr, "\n".join(augmented_label_lines), CLASS_COLORS_BGR)
     left_r = resize_to_height(left, target_h)
     right_r = resize_to_height(right, target_h)
     max_w = max(left_r.shape[1], right_r.shape[1])
@@ -189,9 +181,9 @@ def run_preview(target_panel_h: int = 360) -> Path:
             tiles.append(blank)
             continue
 
-        obb_objects = [] if label_text.strip() == "" else aug.parse_obb_label_lines(label_text)
+        objects = [] if label_text.strip() == "" else aug.parse_label_lines(label_text)
         seed = aug.derive_augmentation_seed(fault_class, image_path, 0)
-        out = aug.augment_image_with_labels(image_bgr, obb_objects, transform, seed)
+        out = aug.augment_image_with_labels(image_bgr, objects, transform, seed)
         if out is None:
             LOGGER.warning("Augmentation failed for %s; using original pair.", image_path)
             aug_bgr = image_bgr.copy()

@@ -1,4 +1,4 @@
-"""Phase A training: frozen backbone, OBB head adaptation for Elletromil fault detection."""
+"""Phase A training: frozen backbone, detect head adaptation for Elletromil fault detection."""
 
 from __future__ import annotations
 
@@ -15,7 +15,6 @@ import yaml
 from rich.console import Console
 from rich.table import Table
 from ultralytics import YOLO
-from ultralytics.utils.metrics import OBBMetrics
 
 PROJECT_ROOT: Path = Path(__file__).resolve().parent.parent
 DATASET_YAML: Path = PROJECT_ROOT / "dataset.yaml"
@@ -141,8 +140,8 @@ def run_phase_a_training(dry_run: bool) -> None:
     table = Table(title="Phase A — Training summary")
     table.add_column("Field", style="cyan")
     table.add_column("Value", style="white")
-    table.add_row("Model variant", "yolo26s-obb (COCO OBB pretrained)")
-    table.add_row("Task", "OBB (Oriented Bounding Box)")
+    table.add_row("Model variant", "yolo11m (COCO detect pretrained)")
+    table.add_row("Task", "detect (axis-aligned bbox)")
     table.add_row("Classes", f"6 — {', '.join(class_names)}")
     table.add_row("Frozen layers", "first 10")
     table.add_row("Epochs", "20")
@@ -157,7 +156,7 @@ def run_phase_a_training(dry_run: bool) -> None:
         "imgsz": 640,
         "batch": 16,
         "freeze": 10,
-        "task": "obb",
+        "task": "detect",
         "cfg": "configs/yolo26s_finetune.yaml",
         "project": "runs",
         "name": "phase_a",
@@ -185,15 +184,14 @@ def run_phase_a_training(dry_run: bool) -> None:
             _finalize_phase_a(metrics, epochs, skipped_training=True)
             return
 
-    # yolo26s.pt is detect (xyxy); OBB data needs yolo26s-obb.pt or loss splits cls+4 vs 6-dim targets.
-    model = YOLO("yolo26s-obb.pt")
+    model = YOLO("yolo11m.pt")
     try:
         metrics = model.train(**train_kwargs)
     except Exception:
         logger.error("Phase A training failed.\n%s", traceback.format_exc())
         raise SystemExit(1) from None
 
-    if not isinstance(metrics, OBBMetrics) or metrics.box.all_ap is None or len(metrics.box.all_ap) == 0:
+    if getattr(metrics, "box", None) is None or getattr(metrics.box, "all_ap", None) is None:
         logger.warning("Final metrics missing; running validation on best weights.")
         metrics = _metrics_from_weights(BEST_WEIGHTS)
 
@@ -204,14 +202,14 @@ def run_phase_a_training(dry_run: bool) -> None:
     _finalize_phase_a(metrics, epochs, skipped_training=False)
 
 
-def _metrics_from_weights(weights: Path) -> OBBMetrics:
-    """Run ``model.val`` on given weights and return OBB metrics.
+def _metrics_from_weights(weights: Path):  # type: ignore[no-untyped-def]
+    """Run ``model.val`` on given weights and return metrics.
 
     Args:
         weights: Path to a ``.pt`` checkpoint.
 
     Returns:
-        OBB metrics from validation.
+        Metrics from validation.
 
     Raises:
         SystemExit: If validation fails.
@@ -220,7 +218,7 @@ def _metrics_from_weights(weights: Path) -> OBBMetrics:
     try:
         m.val(
             data=str(DATASET_YAML.resolve()),
-            task="obb",
+            task="detect",
             imgsz=640,
             batch=16,
             split="val",
@@ -231,12 +229,10 @@ def _metrics_from_weights(weights: Path) -> OBBMetrics:
         logger.error("Validation on existing weights failed.\n%s", traceback.format_exc())
         raise SystemExit(1) from None
     out = m.metrics
-    if not isinstance(out, OBBMetrics):
-        raise SystemExit("Expected OBBMetrics from validation.")
     return out
 
 
-def _finalize_phase_a(metrics: OBBMetrics, epochs_trained: int, skipped_training: bool) -> None:
+def _finalize_phase_a(metrics, epochs_trained: int, skipped_training: bool) -> None:  # type: ignore[no-untyped-def]
     """Print Phase A outcomes, optional warning, and write ``phase_a_summary.json``.
 
     Args:
@@ -274,7 +270,7 @@ def parse_args() -> argparse.Namespace:
     Returns:
         Parsed namespace with ``dry_run`` flag.
     """
-    p = argparse.ArgumentParser(description="Phase A: train OBB head with frozen backbone (YOLO26-S).")
+    p = argparse.ArgumentParser(description="Phase A: train detect head with frozen backbone.")
     p.add_argument(
         "--dry-run",
         action="store_true",

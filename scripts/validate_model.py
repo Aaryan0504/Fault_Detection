@@ -1,4 +1,4 @@
-"""Post-training validation: OBB metrics, confusion matrix, and pass/fail reporting."""
+"""Post-training validation: detect metrics, confusion matrix, and pass/fail reporting."""
 
 from __future__ import annotations
 
@@ -19,7 +19,6 @@ from rich.console import Console
 from rich.table import Table
 from rich.text import Text
 from ultralytics import YOLO
-from ultralytics.utils.metrics import OBBMetrics
 
 PROJECT_ROOT: Path = Path(__file__).resolve().parent.parent
 EVAL_DIR: Path = PROJECT_ROOT / "runs" / "evaluation"
@@ -100,7 +99,7 @@ def atomic_write_json(path: Path, payload: dict[str, Any]) -> None:
 
 
 def save_confusion_matrix_plot(
-    metrics: OBBMetrics,
+    metrics,
     class_names: list[str],
     out_path: Path,
 ) -> None:
@@ -140,11 +139,11 @@ def save_confusion_matrix_plot(
     tmp.replace(out_path)
 
 
-def per_class_rows_from_summary(metrics: OBBMetrics) -> list[dict[str, float | str]]:
-    """Convert ``metrics.summary()`` rows to flat metric dicts.
+def per_class_rows_from_summary(metrics) -> list[dict[str, float | str]]:  # type: ignore[no-untyped-def]
+    """Convert ``metrics.summary()`` rows to flat metric dicts (detect task).
 
     Args:
-        metrics: OBB metrics object.
+        metrics: Metrics object.
 
     Returns:
         List of per-class metric dictionaries.
@@ -263,7 +262,7 @@ def run_validation(weights: Path, split: str) -> None:
     try:
         model.val(
             data=str(DATASET_YAML.resolve()),
-            task="obb",
+            task="detect",
             imgsz=640,
             batch=8,
             split=split,
@@ -276,8 +275,8 @@ def run_validation(weights: Path, split: str) -> None:
         raise SystemExit(1) from None
 
     metrics = model.metrics
-    if not isinstance(metrics, OBBMetrics):
-        logger.error("Expected OBBMetrics after validation.")
+    if getattr(metrics, "box", None) is None:
+        logger.error("Expected box metrics after validation.")
         raise SystemExit(1)
 
     rows = per_class_rows_from_summary(metrics)
@@ -330,7 +329,7 @@ def parse_args() -> argparse.Namespace:
     Returns:
         Namespace with ``weights`` and ``split``.
     """
-    p = argparse.ArgumentParser(description="Validate YOLO OBB model and export evaluation pack.")
+    p = argparse.ArgumentParser(description="Validate YOLO detect model and export evaluation pack.")
     p.add_argument(
         "--weights",
         type=Path,

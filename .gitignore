@@ -11,6 +11,13 @@ data/raw/
 # Training outputs and weight checkpoints (large; keep out of git)
 runs/
 *.pt
+verification_report.json
+preview_augmentation.png
+training_monitor.png
+evaluation_report.json
+per_class_metrics.csv
+per_class_metrics.png
+confusion_matrix.png
 __pycache__/
 *.pyc
 *.pyo
