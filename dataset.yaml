@@ -9,5 +9,6 @@ names:
   1: loose_connection
   2: output_cable_fault
   3: ri_cable_mismatch
-  4: signal_cable_mismatch
-  5: screw_fault
+  4: screw_faults
+  5: signal_cable_mismatch
+
