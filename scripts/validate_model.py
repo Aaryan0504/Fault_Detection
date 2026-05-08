@@ -133,7 +133,9 @@ def save_confusion_matrix_plot(
     ax.set_title("Confusion matrix (counts)")
     fig.tight_layout()
     out_path.parent.mkdir(parents=True, exist_ok=True)
-    tmp = out_path.with_suffix(out_path.suffix + ".tmp")
+    # Matplotlib infers output format from the file extension, so ensure the
+    # temporary file still ends with the target suffix (e.g. ".png").
+    tmp = out_path.with_name(out_path.stem + ".tmp" + out_path.suffix)
     fig.savefig(tmp, dpi=200)
     plt.close(fig)
     tmp.replace(out_path)
