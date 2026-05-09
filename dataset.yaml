@@ -3,7 +3,7 @@ train: images/train
 val: images/val
 test: images/test
 task: detect
-nc: 6
+nc: 9
 names:
   0: input_cable_fault
   1: loose_connection
