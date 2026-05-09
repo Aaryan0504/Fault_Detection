@@ -11,4 +11,6 @@ names:
   3: ri_cable_mismatch
   4: screw_faults
   5: signal_cable_mismatch
-
+  6: J14_cable_mismatch
+  7: red_white_mismatch
+  8: ferrule_mismatch

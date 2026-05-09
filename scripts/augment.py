@@ -40,6 +40,64 @@ RANDOM_STATE = 42
 # augmenting to avoid OpenCV (-4: Insufficient memory).
 MAX_INPUT_LONG_EDGE = 2048
 
+# Class names used for summary printing (must match dataset.yaml).
+CLASS_NAMES: dict[int, str] = {
+    0: "input_cable_fault",
+    1: "loose_connection",
+    2: "output_cable_fault",
+    3: "ri_cable_mismatch",
+    4: "signal_cable_mismatch",
+    5: "screw_fault",
+}
+
+
+def _init_split_counts() -> dict[str, dict[str, int]]:
+    counts: dict[str, dict[str, int]] = {}
+    for split in ("train", "val", "test"):
+        counts[split] = {"total_images": 0, "background_images": 0, "total_objects": 0}
+        for cid in sorted(CLASS_NAMES):
+            name = CLASS_NAMES[cid]
+            counts[split][f"images_{name}"] = 0
+            counts[split][f"objects_{name}"] = 0
+    return counts
+
+
+def _update_counts(counts: dict[str, dict[str, int]], split: str, objects) -> None:  # type: ignore[no-untyped-def]
+    counts[split]["total_images"] += 1
+    if not objects:
+        counts[split]["background_images"] += 1
+        return
+    per_image_classes = set()
+    for cid, _bbox in objects:
+        per_image_classes.add(int(cid))
+        name = CLASS_NAMES.get(int(cid))
+        if name is not None:
+            counts[split][f"objects_{name}"] += 1
+            counts[split]["total_objects"] += 1
+    for cid in per_image_classes:
+        name = CLASS_NAMES.get(int(cid))
+        if name is not None:
+            counts[split][f"images_{name}"] += 1
+
+
+def print_counts_table(counts: dict[str, dict[str, int]]) -> None:
+    def _row(split: str) -> list[str]:
+        c = counts[split]
+        parts = [
+            f"{split:>5}",
+            f"images={c['total_images']}",
+            f"bg={c['background_images']}",
+            f"objects={c['total_objects']}",
+        ]
+        for cid in sorted(CLASS_NAMES):
+            name = CLASS_NAMES[cid]
+            parts.append(f"{name}: {c[f'images_{name}']} imgs / {c[f'objects_{name}']} objs")
+        return parts
+
+    print("\nAugmented dataset class summary (per split):")
+    for split in ("train", "val", "test"):
+        print(" - " + " | ".join(_row(split)))
+
 
 def get_project_root() -> Path:
     """Return the repository root directory.
@@ -393,7 +451,11 @@ def copy_split(split: str) -> int:
         written += 1
     return written
 
-def augment_train_split(transform: A.Compose, aug_per_image: int) -> int:
+def augment_train_split(
+    transform: A.Compose,
+    aug_per_image: int,
+    counts: dict[str, dict[str, int]],
+) -> int:
     """Write train split: copy originals + write augmented variants (train only)."""
     images = list_split_images("train")
     out_img_dir = AUG_ROOT / "images" / "train"
@@ -428,6 +490,7 @@ def augment_train_split(transform: A.Compose, aug_per_image: int) -> int:
         out_img = out_img_dir / f"{image_path.stem}.png"
         out_lbl = out_lbl_dir / f"{image_path.stem}.txt"
         _write_sample(image_bgr, base_lines, out_img, out_lbl)
+        _update_counts(counts, "train", objects)
         written += 1
 
         # 2) Write augmented variants.
@@ -443,6 +506,9 @@ def augment_train_split(transform: A.Compose, aug_per_image: int) -> int:
             out_img_a = out_img_dir / f"{aug_stem}.png"
             out_lbl_a = out_lbl_dir / f"{aug_stem}.txt"
             _write_sample(aug_bgr, lines, out_img_a, out_lbl_a)
+            # Re-parse the written lines for counting (keeps counting logic consistent).
+            aug_objects = parse_label_lines("\n".join(lines)) if lines else []
+            _update_counts(counts, "train", aug_objects)
             written += 1
 
     return written
@@ -480,7 +546,9 @@ def main() -> None:
     if not RAW_LABELS_ROOT.is_dir():
         raise SystemExit(f"Missing raw labels folder: {RAW_LABELS_ROOT}")
 
-    n_train = augment_train_split(transform, aug_per_image=args.aug_per_image)
+    counts = _init_split_counts()
+
+    n_train = augment_train_split(transform, aug_per_image=args.aug_per_image, counts=counts)
     n_val = copy_split("val")
     n_test = copy_split("test")
 
@@ -489,6 +557,7 @@ def main() -> None:
     print(f"train written: {n_train} (includes originals + augmented)")
     print(f"val copied:   {n_val} (no augmentation)")
     print(f"test copied:  {n_test} (no augmentation)")
+    print_counts_table(counts)
 
 
 if __name__ == "__main__":
