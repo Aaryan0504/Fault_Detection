@@ -1,0 +1,12 @@
+# Paths: use forward slashes OR single quotes (see below).
+# BAD in double quotes: "C:\Users\..."  — backslash is an escape in YAML.
+# GOOD: 'C:\Users\...'  OR  C:/Users/.../file.jpg
+
+weights: null
+
+ideal_images:
+  group_01245: 'C:\Users\AARYAN\Desktop\ideal_images\No_Fault_1.jpg'
+  class_3: 'C:\Users\AARYAN\Desktop\ideal_images\No_Fault_351.jpg'
+  class_6: 'C:\Users\AARYAN\Desktop\ideal_images\No_Fault_118.jpg'
+  class_7: 'C:\Users\AARYAN\Desktop\ideal_images\No_Fault_4.jpg'
+  class_8: 'C:\Users\AARYAN\Desktop\ideal_images\No_Fault_339.jpg'

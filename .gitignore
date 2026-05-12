@@ -1,6 +1,7 @@
 new_venv/
 run.py
 yolo_weights/
+runs_working_1to6/
 
 # Augmented dataset (large binaries — distribute via Drive / release / cloud; see README)
 data/augmented/
@@ -18,6 +19,10 @@ evaluation_report.json
 per_class_metrics.csv
 per_class_metrics.png
 confusion_matrix.png
+
+# API uploads / prediction outputs
+uploads/
+outputs/
 __pycache__/
 *.pyc
 *.pyo
