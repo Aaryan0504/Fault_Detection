@@ -1,4 +1,4 @@
-# Transformer terminal fault detection (YOLO)
+# Fault Detection (YOLO)
 
 This repository prepares a **YOLO detect** dataset (axis-aligned bounding boxes) and trains an **Ultralytics YOLO** model on transformer terminal fault classes. Raw photos are **manually labeled**; the **first six fault types** (class IDs **0–5** in `dataset.yaml`) use **offline augmentation** because they had limited data—variants are generated, stored on **Google Drive**, and the model is trained in **Google Colab**. The **last three fault types** (class IDs **6, 7, 8**) already had **enough images**, so those are **not augmented** and are used **directly from Drive** alongside the augmented set for a single nine-class training run.
 
