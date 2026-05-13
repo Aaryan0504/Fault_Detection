@@ -5,6 +5,7 @@ from __future__ import annotations
 import re
 import shutil
 from pathlib import Path
+from typing import Any
 
 from fastapi import FastAPI, File, UploadFile
 from fastapi.responses import JSONResponse
@@ -107,6 +108,76 @@ async def predict(file: UploadFile = File(...)) -> JSONResponse:
             "detections": detections,
         }
     )
+
+
+def _primary_detection(detections: list[dict[str, Any]]) -> dict[str, Any] | None:
+    if not detections:
+        return None
+    return max(detections, key=lambda d: float(d.get("confidence", 0.0)))
+
+
+@app.post("/predict_batch")
+async def predict_batch(files: list[UploadFile] = File(...)) -> JSONResponse:
+    """Run inference on multiple uploads; returns one entry per file (no image bytes)."""
+    if model is None:
+        return JSONResponse(
+            {"message": "Model not loaded", "results": []},
+            status_code=503,
+        )
+    if not files:
+        return JSONResponse({"message": "No files", "results": []})
+
+    names = model.names
+    out: list[dict[str, Any]] = []
+
+    for i, upload in enumerate(files):
+        filename = _safe_upload_filename(upload.filename)
+        stem = Path(filename).stem
+        suffix = Path(filename).suffix
+        unique_name = f"{stem}_b{i}{suffix}"
+        input_path = UPLOAD_FOLDER / unique_name
+        with open(input_path, "wb") as buffer:
+            shutil.copyfileobj(upload.file, buffer)
+
+        results = model.predict(
+            source=str(input_path),
+            imgsz=640,
+            conf=0.25,
+            iou=0.5,
+            max_det=20,
+            save=False,
+            verbose=False,
+        )
+
+        detections: list[dict[str, Any]] = []
+        for result in results:
+            boxes = result.boxes
+            if boxes is None or len(boxes) == 0:
+                continue
+            for box in boxes:
+                cls_idx = int(box.cls[0])
+                class_name = names[cls_idx] if isinstance(names, dict) else names[cls_idx]
+                detections.append(
+                    {
+                        "class_id": cls_idx,
+                        "class_name": class_name,
+                        "confidence": float(box.conf[0]),
+                        "bbox": box.xyxy[0].tolist(),
+                    }
+                )
+
+        primary = _primary_detection(detections)
+        out.append(
+            {
+                "filename": unique_name,
+                "original_filename": upload.filename or unique_name,
+                "has_fault": bool(detections),
+                "detections": detections,
+                "primary": primary,
+            }
+        )
+
+    return JSONResponse({"message": "Prediction successful", "results": out})
 
 
 @app.get("/health")
