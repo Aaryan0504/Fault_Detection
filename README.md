@@ -1,17 +1,106 @@
-# Fault Detection (YOLO)
+# PowerVision AI — Electromill Fault Detection (YOLO)
 
-This repository prepares a **YOLO detect** dataset (axis-aligned bounding boxes) and trains an **Ultralytics YOLO** model on transformer terminal fault classes. Raw photos are **manually labeled**; the **first six fault types** (class IDs **0–5** in `dataset.yaml`) use **offline augmentation** because they had limited data—variants are generated, stored on **Google Drive**, and the model is trained in **Google Colab**. The **last three fault types** (class IDs **6, 7, 8**) already had **enough images**, so those are **not augmented** and are used **directly from Drive** alongside the augmented set for a single nine-class training run.
+Industrial **object detection** for transformer terminal and cabling faults. The project prepares a **YOLO detect** dataset (axis-aligned bounding boxes), trains an **Ultralytics YOLO** model in two phases, and ships a **Streamlit inspection UI** (**PowerVision AI**) plus a **FastAPI** inference service.
+
+Raw photos are **manually labeled**. The **first six fault types** (class IDs **0–5** in `dataset.yaml`) use **offline augmentation** when data is scarce; variants are stored on **Google Drive** and training often runs in **Google Colab**. The **last three fault types** (class IDs **6, 7, 8**) typically have enough images and are used **without script-based augmentation**, merged into the same nine-class dataset for a single training run.
 
 ---
 
-## Dataset strategy (Drive + Colab)
+## Table of contents
 
-| Group | Class IDs (`dataset.yaml`) | Data volume | Augmentation | Storage / training |
-|--------|----------------------------|--------------|--------------|---------------------|
-| **First six faults** | `0`–`5` | Limited | Yes — train split is expanded with Albumentations (see Phase 1 scripts); val/test copied as-is | Augmented images and labels are uploaded to **Google Drive**; **model training runs in Google Colab** (GPU). |
-| **Last three faults** | `6`, `7`, `8` | Sufficient | **No** — originals used as-is | Placed on **Google Drive** without script-based augmentation; Colab (or local training) reads them from the same dataset layout as the other classes. |
+1. [Project overview](#project-overview)
+2. [Repository layout](#repository-layout)
+3. [Fault classes](#fault-classes-datasetyaml)
+4. [Prerequisites and setup](#prerequisites-and-setup)
+5. [Phase 1 — Dataset preparation](#phase-1--dataset-preparation)
+6. [Phase 2 — Training and evaluation](#phase-2--training-and-evaluation)
+7. [Inference — PowerVision AI (Streamlit)](#inference--powervision-ai-streamlit)
+8. [Inference — FastAPI REST API](#inference--fastapi-rest-api)
+9. [Configuration reference](#configuration-reference)
+10. [Troubleshooting](#troubleshooting)
+11. [General notes](#general-notes)
 
-The committed root file **`dataset.yaml`** defines **nine** classes (`nc: 9`) and points at the combined dataset root (typically `data/augmented` after you merge augmented 0–5 data with direct 6–8 data under the same `images/` / `labels/` tree). If you train only from Drive in Colab, mount Drive and set `path` in a copy of `dataset.yaml` to the mounted folder so `train`, `val`, and `test` resolve correctly.
+---
+
+## Project overview
+
+| Layer | Purpose |
+|--------|---------|
+| **Data** | `data/raw/` → augment (classes 0–5) → `data/augmented/`; merge classes 6–8; `dataset.yaml` defines nine classes and splits. |
+| **Training** | Two-phase fine-tune: frozen backbone (Phase A) → full fine-tune (Phase B); weights under `runs/phase_b/weights/best.pt`. |
+| **UI** | `api/streamlit_app.py` — multi-image upload, batch analysis, aggregate report, per-image detail with side-by-side comparison. |
+| **API** | `api/main.py` — single- and multi-file prediction for integrations. |
+
+```mermaid
+flowchart LR
+  subgraph data [Data]
+    Raw[data/raw]
+    Aug[data/augmented]
+    Raw --> Aug
+  end
+  subgraph train [Training]
+    PA[Phase A\nfrozen backbone]
+    PB[Phase B\nfull fine-tune]
+    W[best.pt]
+    Aug --> PA --> PB --> W
+  end
+  subgraph deploy [Deployment]
+    ST[Streamlit\nPowerVision AI]
+    API[FastAPI]
+    W --> ST
+    W --> API
+  end
+```
+
+### Dataset strategy (Drive + Colab)
+
+| Group | Class IDs | Data volume | Augmentation | Storage / training |
+|--------|-----------|-------------|--------------|---------------------|
+| **First six faults** | `0`–`5` | Limited | Yes — train split expanded with Albumentations (`scripts/augment.py`); val/test copied as-is | Augmented data on **Google Drive**; **Colab** (`notebooks/Final_Faults.ipynb`) or local `train_phase_*.py` |
+| **Last three faults** | `6`, `7`, `8` | Sufficient | **No** — originals as-is | Same `images/` / `labels/` tree on Drive or under `data/augmented/` |
+
+The committed **`dataset.yaml`** defines **nine** classes (`nc: 9`) and points at the combined dataset root (typically `data/augmented`). For Colab, mount Drive and set `path` in a copy of `dataset.yaml` so `train`, `val`, and `test` resolve correctly.
+
+**“No fault” images:** Treated as **background** (no object), not a class. Use a label file that is **empty** (same stem as the image under `labels/<split>/`).
+
+---
+
+## Repository layout
+
+```text
+Fault_Detection_Working/
+├── dataset.yaml              # Nine classes, dataset root, train/val/test paths
+├── requirements.txt          # Python dependencies (Ultralytics, Streamlit, FastAPI, …)
+├── README.md                 # This file
+├── configs/
+│   └── yolo26s_finetune.yaml # Hyperparameter overrides for Phase A/B
+├── data/                     # Gitignored — not in repo
+│   ├── raw/                  # Manual labels + camera images
+│   └── augmented/            # Phase 1 output + merged class 6–8 data
+├── scripts/
+│   ├── augment.py            # Albumentations on train split (classes 0–5 workflow)
+│   ├── verify_dataset.py     # Layout and label checks → verification_report.json
+│   ├── preview_augmentation.py
+│   ├── bootstrap_raw_labels.py  # Empty .txt placeholders per raw image
+│   ├── train_phase_a.py      # Frozen backbone (~20 epochs)
+│   ├── train_phase_b.py      # Full fine-tune (up to 100 epochs, early stop)
+│   ├── monitor_training.py   # Live plots from results.csv
+│   └── validate_model.py     # Test/val metrics → runs/evaluation/
+├── runs/                     # Gitignored — training outputs
+│   ├── phase_a/
+│   ├── phase_b/weights/best.pt   # Default weights for inference
+│   └── evaluation/
+├── api/
+│   ├── streamlit_app.py      # PowerVision AI UI
+│   ├── main.py               # FastAPI server
+│   └── ideal_images.yaml     # Reference “ideal” images per fault group
+├── notebooks/
+│   └── Final_Faults.ipynb    # Colab-oriented training workflow
+├── uploads/                  # Gitignored — API upload staging
+└── outputs/                  # Gitignored — API annotated outputs (single predict)
+```
+
+Large folders (`data/`, `runs/`, `uploads/`, `outputs/`, `*.pt`) are listed in `.gitignore`. Obtain weights and data locally, from Drive, or after training.
 
 ---
 
@@ -19,17 +108,17 @@ The committed root file **`dataset.yaml`** defines **nine** classes (`nc: 9`) an
 
 | ID | Name | Notes |
 |----|------|--------|
-| 0 | `input_cable_fault` | In the “first six” group; typically augmented when data is scarce. |
+| 0 | `input_cable_fault` | First-six group; often augmented when scarce. |
 | 1 | `loose_connection` | Same. |
 | 2 | `output_cable_fault` | Same. |
 | 3 | `ri_cable_mismatch` | Same. |
 | 4 | `screw_faults` | Same. |
 | 5 | `signal_cable_mismatch` | Same. |
-| 6 | `J14_cable_mismatch` | **Enough data** — usually **no** Albumentations pipeline; use from Drive. |
+| 6 | `J14_cable_mismatch` | Enough data — usually **no** Albumentations pipeline. |
 | 7 | `red_white_mismatch` | Same. |
 | 8 | `ferrule_mismatch` | Same. |
 
-**Physical meaning (examples for early classes):**
+**Examples (early classes):**
 
 - **0 — `input_cable_fault`:** Input cable phase order reversed (e.g. 8→9→10).
 - **1 — `loose_connection`:** e.g. blue wire at top-left input terminal unseated.
@@ -38,35 +127,34 @@ The committed root file **`dataset.yaml`** defines **nine** classes (`nc: 9`) an
 - **4 — `screw_faults`:** e.g. one input terminal screw with wrong thread count.
 - **5 — `signal_cable_mismatch`:** Signal cable mismatch.
 
-Classes **6–8** follow the same YOLO label format; definitions match your field labeling convention.
-
-**“No fault” images:** Treated as **background** (no object), not a class. Use a matching label file that is **empty**.
+Classes **6–8** use the same YOLO label format (`class_id cx cy w h`, normalized to `[0, 1]`).
 
 ---
 
-## Prerequisites
+## Prerequisites and setup
 
-- **`data/augmented/`** (and optionally `data/raw/`) are **not stored in git** — see below for how to obtain or build them.
-- Layout: `data/augmented/images/{train,val,test}/` and matching `labels/` trees, plus root `dataset.yaml`.
-- Python 3 with dependencies: `pip install -r requirements.txt`.
-- **Local training:** CUDA GPU strongly recommended; CPU is slow.
-- **Colab training:** Use the Drive-mounted dataset path in `dataset.yaml`.
+- **Python 3.10+** recommended.
+- **`data/augmented/`** and **`data/raw/`** are not in git — build locally or download from shared storage (e.g. Google Drive).
+- **GPU** strongly recommended for training; CPU works but is slow.
+- **Inference:** `runs/phase_b/weights/best.pt` after Phase B (or override via `api/ideal_images.yaml` → `weights`).
 
----
-
-## Setup
-
-From the **project root** (`Fault_Detection_Working/`):
+From the **project root**:
 
 ```bash
 pip install -r requirements.txt
 ```
 
+**Ultralytics version:** YOLO11 checkpoints require **Ultralytics ≥ 8.3** (see `requirements.txt`). If loading `best.pt` fails with `C3k2` / attribute errors:
+
+```bash
+pip install -U "ultralytics>=8.3.100"
+```
+
 ---
 
-## Phase 1 — Dataset preparation (raw → augmented for classes 0–5)
+## Phase 1 — Dataset preparation
 
-### Placing raw images and labels (manual)
+### Raw layout (manual labeling)
 
 ```text
 data/raw/
@@ -80,20 +168,22 @@ data/raw/
     test/
 ```
 
-Each label line (non-empty): `class_id cx cy w h` with all values normalized to `[0, 1]` relative to image width/height.
+Each non-empty label line: `class_id cx cy w h` with values normalized to `[0, 1]`.
 
-### Augmented dataset (`data/augmented/`) — not in git
+Optional: create empty label placeholders before labeling:
 
-Folders **`data/augmented/`** and **`data/raw/`** are **gitignored** so the repo stays small.
+```bash
+python scripts/bootstrap_raw_labels.py
+```
 
-**Ways to get data:**
+### Build augmented dataset (not in git)
 
-1. **Build augmented data locally** — After filling `data/raw/...`, run `python scripts/augment.py` (optional: `--aug-per-image K`). That writes augmented **train** images under `data/augmented/`, copies val/test unchanged, updates `dataset.yaml`. Use this especially for the **first six** fault types; merge in **un-augmented** images/labels for classes **6–8** into the same split folders if they live elsewhere.
-2. **Download from shared storage** — e.g. a zip on **Google Drive**; extract at project root so paths match `dataset.yaml`.
+1. **Local:** Fill `data/raw/`, then run augmentation (especially for classes **0–5**). Merge **un-augmented** images/labels for classes **6–8** into the same split folders.
+2. **Download:** Extract a shared zip at project root so paths match `dataset.yaml`.
 
 **Collaborator download link (placeholder):** *`https://YOUR_LINK_TO_ZIP_OR_FOLDER_HERE`*
 
-### Running the Phase 1 pipeline (from project root)
+### Phase 1 scripts (from project root)
 
 ```bash
 python scripts/augment.py
@@ -103,11 +193,11 @@ python scripts/preview_augmentation.py
 
 | Script | Role |
 |--------|------|
-| **`augment.py`** | Augments **train** only (`--aug-per-image K` variants per train image); copies val/test unchanged; writes PNG + `.txt` under `data/augmented/`; aligns `dataset.yaml` with `path: data/augmented`. |
-| **`verify_dataset.py`** | Layout, 1:1 image/label pairing, numeric ranges, readability; writes `verification_report.json`, prints PASS/FAIL. |
-| **`preview_augmentation.py`** | Sample raw images, one augmentation pass, draws boxes → `preview_augmentation.png`. |
+| **`augment.py`** | Augments **train** only (`--aug-per-image K`); copies val/test; writes PNG + `.txt` under `data/augmented/`; aligns `dataset.yaml` with `path: data/augmented`. |
+| **`verify_dataset.py`** | Layout, 1:1 image/label pairing, numeric ranges; writes `verification_report.json`, prints PASS/FAIL. |
+| **`preview_augmentation.py`** | Sample raw image + one aug pass with boxes → `preview_augmentation.png`. |
 
-### Layout after `augment.py` (and merging class 6–8 data)
+### Layout after merge
 
 ```text
 data/augmented/
@@ -121,32 +211,29 @@ data/augmented/
     test/
 ```
 
-`dataset.yaml` points `train`, `val`, `test` at `images/<split>`; labels live in parallel `labels/<split>/` with the same file stems.
-
-### Label format (YOLO detect)
-
-Each non-empty line: `class_id cx cy w h` with `class_id` in `0`–`8` for the nine classes in the committed `dataset.yaml`.
+`dataset.yaml` points `train`, `val`, `test` at `images/<split>`; labels live in parallel `labels/<split>/` with matching stems.
 
 ---
 
-## Phase 2 — YOLO training configuration and two-phase fine-tuning
+## Phase 2 — Training and evaluation
 
-Phase 2 trains a **YOLO detect** model on the **combined** nine-class dataset (augmented **0–5** + direct **6–8** from Drive when you follow the workflow above). You can run training **locally** with the scripts below or **in Google Colab** against the dataset on Drive.
+Phase 2 trains a **YOLO detect** model on the combined nine-class dataset (locally or in Colab).
 
-### Layout (Phase 2)
+### Files
 
-- `configs/yolo26s_finetune.yaml` — hyperparameter overrides (MuSGD, cosine LR, light aug, `dfl: 0.0`, `task: detect`).
-- `scripts/train_phase_a.py` — freeze backbone (10 layers), train head ~20 epochs.
-- `scripts/train_phase_b.py` — unfreeze all, full fine-tune up to 100 epochs with early stopping.
-- `scripts/monitor_training.py` — live plots from `results.csv`.
-- `scripts/validate_model.py` — evaluation pack under `runs/evaluation/`.
-- `runs/phase_a/`, `runs/phase_b/` — training outputs (weights, CSV, plots).
+| Path | Role |
+|------|------|
+| `configs/yolo26s_finetune.yaml` | MuSGD, cosine LR, light aug, `dfl: 0.0`, `task: detect` |
+| `scripts/train_phase_a.py` | Freeze backbone (10 layers), train head ~20 epochs from **`yolo11m.pt`** |
+| `scripts/train_phase_b.py` | Unfreeze all, fine-tune up to 100 epochs with early stopping |
+| `scripts/monitor_training.py` | Live plots from `results.csv` |
+| `scripts/validate_model.py` | Evaluation pack under `runs/evaluation/` |
 
-### Execution order (local, from project root)
+### Execution order (local)
 
 ```bash
 python scripts/train_phase_a.py
-python scripts/train_phase_a.py --dry-run
+python scripts/train_phase_a.py --dry-run   # optional sanity check
 ```
 
 Optional monitor (second terminal):
@@ -155,15 +242,10 @@ Optional monitor (second terminal):
 python scripts/monitor_training.py
 ```
 
-Phase B (needs `runs/phase_a/weights/best.pt`):
+Phase B (requires `runs/phase_a/weights/best.pt`):
 
 ```bash
 python scripts/train_phase_b.py
-```
-
-Test split evaluation:
-
-```bash
 python scripts/validate_model.py --split test
 ```
 
@@ -178,14 +260,14 @@ python scripts/validate_model.py --weights runs/phase_b/weights/best.pt --split 
 
 On a **small or imbalanced** industrial dataset, training all layers from scratch often **overfits** or erases useful pretrained backbone features. **Phase A** freezes most of the network and adapts the detection head. **Phase B** unfreezes with a **lower** learning rate so the backbone refines without destroying the head.
 
-### Evaluation outputs (`runs/evaluation/`)
+### Evaluation (`runs/evaluation/`)
 
 | Artifact | Meaning |
 |----------|---------|
-| `confusion_matrix.png` | Rows = ground truth, columns = prediction (includes background for unmatched boxes). |
-| `per_class_metrics.csv` | Precision, recall, mAP@0.5, mAP@0.5:0.95 per class. |
-| `per_class_metrics.png` | Bar chart of precision, recall, mAP50. |
-| `evaluation_report.json` | Overall mAP, per-class APs, timing, **verdict**. |
+| `confusion_matrix.png` | Rows = ground truth, columns = prediction |
+| `per_class_metrics.csv` | Precision, recall, mAP@0.5, mAP@0.5:0.95 per class |
+| `per_class_metrics.png` | Bar chart of precision, recall, mAP50 |
+| `evaluation_report.json` | Overall mAP, per-class APs, timing, **verdict** |
 
 **Verdict (`validate_model.py`):**
 
@@ -193,12 +275,7 @@ On a **small or imbalanced** industrial dataset, training all layers from scratc
 - **WARN** — all ≥ 0.60 but some &lt; 0.70  
 - **FAIL** — any class mAP50 &lt; 0.60  
 
-### Resuming after interruption
-
-- **Training:** Ultralytics can `resume=True` on the same run dir with `last.pt`. Re-run the same phase script, or edit `runs/phase_a/args.yaml` / `runs/phase_b/args.yaml` and use the CLI / `resume=True` in `model.train()` with the same `save_dir`.
-- **Phase A prompt:** If `runs/phase_a/weights/best.pt` exists, `train_phase_a.py` may ask to skip training and refresh metrics only.
-
-### GPU memory (local, guidance)
+### GPU memory (guidance)
 
 | Batch | Phase | Approx. VRAM |
 |-------|--------|----------------|
@@ -206,77 +283,201 @@ On a **small or imbalanced** industrial dataset, training all layers from scratc
 | 8 | Phase B | ~4 GB |
 | 4 | Fallback | ~3 GB |
 
-Lower `batch` in the script if you hit OOM.
+Lower `batch` in the training scripts if you hit OOM.
 
-### If a class underperforms (mAP50 &lt; 0.6)
+### Resuming after interruption
 
-1. Collect more **real** images for that fault.  
-2. **Audit labels** (class id, missed boxes, tight bboxes).  
-3. For **0–5**, consider stronger or class-aware augmentation; tune `configs/yolo26s_finetune.yaml` cautiously.
-
-### Notes
-
-- Phase A starts from **`yolo11m.pt`** (see `scripts/train_phase_a.py`).
-- `task: detect` uses axis-aligned boxes and standard box metrics.
-- **`monitor_training.py`** watches `results.csv` (default `runs/phase_b`), refreshes every 10 s, saves `training_monitor.png`, Rich status line; stop with Ctrl+C.
+Ultralytics can resume with `last.pt` in the same run directory. If `runs/phase_a/weights/best.pt` already exists, `train_phase_a.py` may offer to skip training and refresh metrics only.
 
 ---
 
-## Inference and demo (optional)
+## Inference — PowerVision AI (Streamlit)
 
-### Streamlit UI (`api/streamlit_app.py`)
+**App:** `api/streamlit_app.py`  
+**Brand:** PowerVision AI Inspection System — multi-upload workflow, live analysis log, combined report, and per-image inspection detail.
 
-Lightweight **browser demo** for presentations: upload a faulty terminal image, see the **predicted fault name**, the **tagged** detection image, and an **ideal reference** image when paths are configured.
+### Run
 
-**Run** (from project root, after `pip install -r requirements.txt` and with `runs/phase_b/weights/best.pt` present, or override weights in the YAML below):
+From project root (with `runs/phase_b/weights/best.pt` present, or set `weights` in `api/ideal_images.yaml`):
 
 ```bash
 streamlit run api/streamlit_app.py
 ```
 
-**Configuration — `api/ideal_images.yaml`**
+Default URL: `http://localhost:8501`
 
-| Key | Used for class IDs |
-|-----|---------------------|
-| `group_01245` | `0`, `1`, `2`, `4`, `5` (one shared reference image) |
-| `class_3` | `3` |
-| `class_6` | `6` |
-| `class_7` | `7` |
-| `class_8` | `8` |
+Use the sidebar **Reset workflow** to clear uploads, results, and temp files. If the theme looks dark, use **☰ → Settings → Theme → Light** to match the app’s light styling.
 
-Optional: set `weights` to an absolute path if `best.pt` is not at `runs/phase_b/weights/best.pt`. To point at another YAML file, set environment variable `FAULT_IDEAL_YAML` to that path.
+### UI workflow
 
-**Windows paths in YAML:** do not use double quotes around `C:\...` (backslash is an escape in YAML). Use **single quotes** (`'C:\Users\...'`) or **forward slashes** (`C:/Users/...`).
+```mermaid
+stateDiagram-v2
+  [*] --> upload: Start
+  upload --> analyzing: Start analysis
+  analyzing --> report: Next (batch done)
+  report --> detail: Open row
+  detail --> report: Back
+  upload --> upload: New upload
+  report --> upload: New upload
+```
 
-Inference writes the upload **verbatim** to a temp file and calls `model.predict(source=...)` (same idea as the FastAPI route), so pixels are not preprocessed through PIL before the model.
+| Phase | What the user sees |
+|--------|---------------------|
+| **upload** | Multi-file uploader (up to **10** files, **10 MB** each; JPEG, PNG, TIFF, WebP, BMP). Thumbnail grid and file metadata. |
+| **analyzing** | Modal dialog with progress bar and timestamped log; processes one image per rerun; **Abort analysis** supported. |
+| **report** | **Detailed findings** — one card per image: index, thumbnail, filename, fault type line, description, status pill (**Fault detected** / **Clear**), **Open** button. Summary pills: total images, fault count, clear count. |
+| **detail** | **Inspection detail** for one image: **Analyzed · model overlay** and **Ideal · reference** shown **side by side** in equal-sized frames (720×480 cover crop). Below: fault alert + confidence, fault type, **Description**, and **Analysis metadata** (filename, timestamp, fault type). |
 
-**Ultralytics version:** YOLO11 checkpoints need **Ultralytics ≥ 8.3** (see `requirements.txt`). If loading `best.pt` fails with `C3k2` / attribute errors, upgrade: `pip install -U "ultralytics>=8.3.100"`.
+### Inference behavior (UI)
 
-If the app still looks dark, use the **☰ menu → Settings → Theme → Light** so Streamlit’s widgets match the app’s light styling.
+- Model loaded once via `@st.cache_resource` from `runs/phase_b/weights/best.pt` (or YAML override).
+- Per image: `model.predict(imgsz=640, conf=0.25, iou=0.5, max_det=20)`.
+- **Fault:** highest-confidence box drives class, human-readable **fault label**, and **description** (`_fault_label_and_crisp`).
+- Annotated overlay saved to a temp workdir (`*_annotated.jpg` via `result.plot()`).
+- **Clear:** no boxes above confidence threshold; raw upload shown in report thumbnail.
+- **Ideal reference:** resolved from `api/ideal_images.yaml` by class ID (see below); shown in detail view when the file exists.
 
-### FastAPI (`api/main.py`)
+### Ideal image mapping (`api/ideal_images.yaml`)
 
-REST inference: run with `python api/main.py` (or `uvicorn api.main:app`) and `POST /predict` with the image file. See `api/main.py` for host, port, and response shape.
+| YAML key | Class IDs | Purpose |
+|----------|-----------|---------|
+| `group_01245` | `0`, `1`, `2`, `4`, `5` | One shared reference image |
+| `class_3` | `3` | Dedicated reference |
+| `class_6` | `6` | Dedicated reference |
+| `class_7` | `7` | Dedicated reference |
+| `class_8` | `8` | Dedicated reference |
+
+Optional environment variable: `FAULT_IDEAL_YAML` → path to an alternate YAML file.
+
+**Windows paths in YAML:** Do **not** wrap `C:\...` in **double** quotes (backslash escapes). Use **single quotes** or **forward slashes**:
+
+```yaml
+ideal_images:
+  group_01245: 'C:/path/to/ideal.jpg'
+```
+
+---
+
+## Inference — FastAPI REST API
+
+**App:** `api/main.py`  
+**Default weights:** `runs/phase_b/weights/best.pt` (loaded at startup).
+
+### Run
+
+```bash
+python api/main.py
+```
+
+Or:
+
+```bash
+uvicorn api.main:app --host 127.0.0.1 --port 8000
+```
+
+### Endpoints
+
+| Method | Path | Description |
+|--------|------|-------------|
+| `GET` | `/health` | `{"status": "ok", "weights": "<path>"}` |
+| `POST` | `/predict` | Single image upload; runs inference with `save=True`; annotated image under `outputs/predictions/` |
+| `POST` | `/predict_batch` | Multiple files; JSON per file (no image bytes in response) |
+
+### Shared predict settings
+
+- `imgsz=640`
+- `conf=0.25`
+- `iou=0.5`
+- `max_det=20`
+
+### `POST /predict` response (shape)
+
+```json
+{
+  "message": "Prediction successful",
+  "detections": [
+    {
+      "class_id": 0,
+      "class_name": "input_cable_fault",
+      "confidence": 0.73,
+      "bbox": [x1, y1, x2, y2]
+    }
+  ]
+}
+```
+
+Uploads are stored under `uploads/` using a sanitized version of the client filename so Ultralytics output names stay predictable.
+
+### `POST /predict_batch` response (shape)
+
+```json
+{
+  "message": "Prediction successful",
+  "results": [
+    {
+      "filename": "image_b0.jpg",
+      "original_filename": "image.jpg",
+      "has_fault": true,
+      "detections": [ ... ],
+      "primary": { "class_id": 0, "class_name": "...", "confidence": 0.73, "bbox": [...] }
+    }
+  ]
+}
+```
+
+`primary` is the highest-confidence detection per file, or omitted when there are no detections.
+
+---
+
+## Configuration reference
+
+| Item | Location / default |
+|------|---------------------|
+| Dataset classes & paths | `dataset.yaml` |
+| Training hyperparameters | `configs/yolo26s_finetune.yaml` |
+| Ideal images & optional weights override | `api/ideal_images.yaml` |
+| Ideal YAML path override | Env `FAULT_IDEAL_YAML` |
+| Phase B weights (inference) | `runs/phase_b/weights/best.pt` |
+| Streamlit confidence / IoU | `CONF=0.25`, `IOU=0.5` in `api/streamlit_app.py` |
+| Detail compare frame size | `_DETAIL_COMPARE_W=720`, `_DETAIL_COMPARE_H=480` in `api/streamlit_app.py` |
+
+---
+
+## Troubleshooting
+
+| Issue | What to try |
+|--------|-------------|
+| `C3k2` / can't get attribute when loading `best.pt` | Upgrade Ultralytics: `pip install -U "ultralytics>=8.3.100"` |
+| Streamlit dialog error | Requires Streamlit ≥ 1.36: `pip install -U "streamlit>=1.36"` |
+| Missing weights at startup (API/UI) | Run Phase B training or set `weights:` in `ideal_images.yaml` |
+| Ideal image missing in detail view | Fix paths in `ideal_images.yaml`; check class ID → key mapping |
+| YAML path errors on Windows | Single-quoted or forward-slash paths (see above) |
+| Class mAP50 &lt; 0.6 | More real images, label audit, tuned augmentation for 0–5 |
 
 ---
 
 ## General notes
 
 - Run scripts as `python scripts/<script>.py` from the **project root** so relative paths resolve.
-- Missing label file → image skipped with warning. Empty label file → background sample.
-- Augmentation uses Albumentations bbox transforms; labels are the **transformed** boxes, not guessed.
+- Missing label file → image skipped with warning (verify script). Empty label file → background sample.
+- Augmentation uses Albumentations bbox transforms; labels are **transformed** boxes, not guessed.
+- The Streamlit app writes uploads to a **temp directory** per batch and deletes it on reset or new upload.
+- FastAPI single-file predict saves annotated outputs under `outputs/predictions/`; batch predict does not save images (`save=False`).
 
 ---
 
-## Repository root (reference)
+## Quick start (inference only)
 
-Key paths under `Fault_Detection_Working/`:
+If you already have `runs/phase_b/weights/best.pt` and `api/ideal_images.yaml` configured:
 
-- `dataset.yaml` — nine classes, dataset root path, splits.  
-- `data/raw/`, `data/augmented/` — local data (gitignored).  
-- `scripts/` — augment, verify, preview, train Phase A/B, monitor, validate.  
-- `configs/` — YOLO training overrides.  
-- `runs/` — training and evaluation outputs (often gitignored or large).  
-- `api/` — FastAPI server (`main.py`), Streamlit demo (`streamlit_app.py`), ideal-image paths (`ideal_images.yaml`).  
+```bash
+pip install -r requirements.txt
+streamlit run api/streamlit_app.py
+```
 
-**`README_PHASE2.md`** is a one-line pointer to this file so older links still resolve.
+For programmatic access:
+
+```bash
+python api/main.py
+curl http://127.0.0.1:8000/health
+```

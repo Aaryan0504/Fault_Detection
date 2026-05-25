@@ -29,6 +29,9 @@ _MAX_FILES = 10
 _MAX_BYTES_PER_FILE = 10 * 1024 * 1024
 _ALLOWED_SUFFIX = {".jpg", ".jpeg", ".png", ".bmp", ".webp", ".tiff", ".tif"}
 _UPLOAD_TILE = 140
+# Detail page: analyzed vs ideal shown in identical-sized frames (cover crop).
+_DETAIL_COMPARE_W = 720
+_DETAIL_COMPARE_H = 480
 
 _UI_CSS = """
 <style>
@@ -353,7 +356,7 @@ def _render_header() -> None:
     st.markdown(_UI_CSS, unsafe_allow_html=True)
     st.markdown(
         '<div class="pv-header">'
-        '<span class="pv-brand-dot">&#9679;</span><span class="pv-brand">PowerVision AI</span>'
+        '<span class="pv-brand-dot">&#9679;</span><span class="pv-brand">PowerVision AI Inspection System</span>'
         '<div class="pv-sub">Industrial image inspection</div>'
         "</div>",
         unsafe_allow_html=True,
@@ -525,17 +528,22 @@ def _analysis_dialog(model: YOLO, names: dict[int, str], ideal_map: dict[str, st
     _inner()
 
 
-def _thumb_square_cover(rgb: np.ndarray, side: int) -> np.ndarray:
-    """Resize and center-crop to `side`×`side` so every thumbnail matches."""
+def _rectangle_cover(rgb: np.ndarray, out_w: int, out_h: int) -> np.ndarray:
+    """Resize and center-crop so output is exactly ``out_w``×``out_h`` (cover)."""
     h, w = rgb.shape[:2]
     if h <= 0 or w <= 0:
         return rgb
-    scale = max(side / h, side / w)
+    scale = max(out_w / w, out_h / h)
     nw, nh = max(1, int(round(w * scale))), max(1, int(round(h * scale)))
     resized = cv2.resize(rgb, (nw, nh), interpolation=cv2.INTER_AREA)
-    y0 = max(0, (nh - side) // 2)
-    x0 = max(0, (nw - side) // 2)
-    return resized[y0 : y0 + side, x0 : x0 + side]
+    x0 = max(0, (nw - out_w) // 2)
+    y0 = max(0, (nh - out_h) // 2)
+    return resized[y0 : y0 + out_h, x0 : x0 + out_w]
+
+
+def _thumb_square_cover(rgb: np.ndarray, side: int) -> np.ndarray:
+    """Resize and center-crop to `side`×`side` so every thumbnail matches."""
+    return _rectangle_cover(rgb, side, side)
 
 
 def _load_rgb(path: str) -> np.ndarray | None:
@@ -545,6 +553,14 @@ def _load_rgb(path: str) -> np.ndarray | None:
     if bgr is None:
         return None
     return cv2.cvtColor(bgr, cv2.COLOR_BGR2RGB)
+
+
+def _detail_compare_box(path: str) -> np.ndarray | None:
+    """Fixed canvas for detail view so analyzed and ideal panels share one box size."""
+    rgb = _load_rgb(path)
+    if rgb is None:
+        return None
+    return _rectangle_cover(rgb, _DETAIL_COMPARE_W, _DETAIL_COMPARE_H)
 
 
 def _detail_meta_html(filename: str, ts: str, fault_type: str) -> str:
@@ -618,71 +634,83 @@ def main() -> None:
                     '<p class="pv-section-title" style="margin:0 0 0.35rem 0;">Inspection detail</p>',
                     unsafe_allow_html=True,
                 )
-                col_img, col_info = st.columns([2.15, 1.0], gap="medium")
                 ann = r.get("annotated_path") or ""
                 ip = r.get("ideal_path") or ""
                 ts = datetime.now().strftime("%d-%m-%Y %I:%M %p")
 
-                with col_img:
+                # Images: analyzed overlay and ideal reference side-by-side
+                col_a, col_b = st.columns(2, gap="medium")
+                with col_a:
                     st.caption("**Analyzed · model overlay**")
                     if ann and os.path.isfile(ann):
-                        st.image(ann, use_container_width=True)
+                        boxed_ann = _detail_compare_box(ann)
+                        if boxed_ann is not None:
+                            st.image(boxed_ann, use_container_width=True)
+                        else:
+                            st.caption("—")
                     else:
                         st.caption("—")
-                    st.markdown('<div style="height:0.5rem"></div>', unsafe_allow_html=True)
+                with col_b:
                     st.caption("**Ideal · reference**")
                     if ip and os.path.isfile(ip):
-                        st.image(ip, use_container_width=True)
+                        boxed_ideal = _detail_compare_box(ip)
+                        if boxed_ideal is not None:
+                            st.image(boxed_ideal, use_container_width=True)
+                        else:
+                            st.caption("—")
                     elif r["has_fault"]:
                         st.caption("Configure `api/ideal_images.yaml` for this class.")
                     else:
                         st.caption("—")
 
-                with col_info:
-                    if r["has_fault"]:
-                        st.markdown(
-                            '<div class="detail-alert"><strong style="color:#b91c1c">Fault detected</strong> · '
-                            f'<span style="font-size:1.05rem;font-weight:700">{r["confidence"]:.1%}</span>'
-                            " <span style=\"color:#64748b\">detection confidence</span></div>",
-                            unsafe_allow_html=True,
-                        )
-                        ft = html.escape(
-                            (r.get("fault_label") or "").strip()
-                            or (str(r.get("class_name") or "").replace("_", " ").title())
-                            or "Fault",
-                        )
-                        st.markdown(
-                            f'<p style="margin:0.35rem 0 0.2rem 0;font-size:0.9rem;">'
-                            f'<span style="color:#64748b;font-weight:600;">Fault type</span> · '
-                            f'<span style="color:#1d4ed8;font-weight:600;">{ft}</span></p>',
-                            unsafe_allow_html=True,
-                        )
-                        st.markdown("**Description**")
-                        st.markdown(
-                            f'<p style="margin:0.1rem 0 0.65rem 0;font-size:0.88rem;color:#4b5563;line-height:1.45;">{html.escape(r["description"])}</p>',
-                            unsafe_allow_html=True,
-                        )
-                        fl_meta = (r.get("fault_label") or "").strip() or "—"
-                        st.markdown(
-                            _detail_meta_html(r["filename"], ts, fl_meta),
-                            unsafe_allow_html=True,
-                        )
-                    else:
-                        st.success("No fault detected for this image.")
-                        st.markdown(
-                            '<p style="margin:0.15rem 0 0.2rem 0;font-size:0.9rem;">'
-                            '<span style="color:#64748b;font-weight:600;">Fault type</span> · '
-                            '<span style="color:#047857;font-weight:600;">Clear</span></p>',
-                            unsafe_allow_html=True,
-                        )
-                        st.markdown(
-                            f'<p style="margin:0 0 0.65rem 0;font-size:0.88rem;color:#4b5563;">{html.escape(r["description"])}</p>',
-                            unsafe_allow_html=True,
-                        )
-                        st.markdown(
-                            _detail_meta_html(r["filename"], ts, "Clear"),
-                            unsafe_allow_html=True,
-                        )
+                st.markdown('<div style="height:0.75rem"></div>', unsafe_allow_html=True)
+
+                # Description + metadata below the images
+                if r["has_fault"]:
+                    st.markdown(
+                        '<div class="detail-alert"><strong style="color:#b91c1c">Fault detected</strong> · '
+                        f'<span style="font-size:1.05rem;font-weight:700">{r["confidence"]:.1%}</span>'
+                        " <span style=\"color:#64748b\">detection confidence</span></div>",
+                        unsafe_allow_html=True,
+                    )
+                    ft = html.escape(
+                        (r.get("fault_label") or "").strip()
+                        or (str(r.get("class_name") or "").replace("_", " ").title())
+                        or "Fault",
+                    )
+                    st.markdown(
+                        f'<p style="margin:0.35rem 0 0.2rem 0;font-size:0.9rem;">'
+                        f'<span style="color:#64748b;font-weight:600;">Fault type</span> · '
+                        f'<span style="color:#1d4ed8;font-weight:600;">{ft}</span></p>',
+                        unsafe_allow_html=True,
+                    )
+                    st.markdown("**Description**")
+                    st.markdown(
+                        f'<p style="margin:0.1rem 0 0.65rem 0;font-size:0.88rem;color:#4b5563;line-height:1.45;">{html.escape(r["description"])}</p>',
+                        unsafe_allow_html=True,
+                    )
+                    fl_meta = (r.get("fault_label") or "").strip() or "—"
+                    st.markdown(
+                        _detail_meta_html(r["filename"], ts, fl_meta),
+                        unsafe_allow_html=True,
+                    )
+                else:
+                    st.success("No fault detected for this image.")
+                    st.markdown(
+                        '<p style="margin:0.15rem 0 0.2rem 0;font-size:0.9rem;">'
+                        '<span style="color:#64748b;font-weight:600;">Fault type</span> · '
+                        '<span style="color:#047857;font-weight:600;">Clear</span></p>',
+                        unsafe_allow_html=True,
+                    )
+                    st.markdown("**Description**")
+                    st.markdown(
+                        f'<p style="margin:0 0 0.65rem 0;font-size:0.88rem;color:#4b5563;">{html.escape(r["description"])}</p>',
+                        unsafe_allow_html=True,
+                    )
+                    st.markdown(
+                        _detail_meta_html(r["filename"], ts, "Clear"),
+                        unsafe_allow_html=True,
+                    )
             st.stop()
         st.session_state.phase = "report"
         st.session_state.selected_idx = None
